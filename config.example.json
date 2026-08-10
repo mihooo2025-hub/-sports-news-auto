@@ -14,8 +14,8 @@
   },
   "fetch_settings": {
     "max_article_age_hours": 12,
-    "max_articles_checked_per_cycle": 100,
-    "max_articles_published_per_cycle": 20,
+    "max_articles_checked_per_cycle": 200,
+    "max_articles_published_per_cycle": 40,
     "language": "ar",
     "country": "EG"
   },
