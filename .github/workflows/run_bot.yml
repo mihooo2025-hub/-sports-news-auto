@@ -1,0 +1,43 @@
+name: نشر أخبار كرة القدم التلقائي (كل ساعة)
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-news-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: تنزيل نسخة المستودع
+        uses: actions/checkout@v4
+
+      - name: إعداد بايثون
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: تثبيت المكتبات المطلوبة
+        run: pip install -r requirements.txt
+
+      - name: تشغيل السكربت
+        env:
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: حفظ قاعدة بيانات منع التكرار (news.db) داخل المستودع
+        run: |
+          git config user.name "News Bot"
+          git config user.email "actions@github.com"
+          git add news.db
+          git diff --staged --quiet && echo "لا تغييرات لحفظها" || git commit -m "تحديث news.db [skip ci]"
+          git push
