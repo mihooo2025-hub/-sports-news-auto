@@ -5,11 +5,11 @@ main.py
 
 يقوم بدورة كاملة:
 1. فحص المصادقة مع ووردبريس أولًا (لتفادي إهدار استدعاءات OpenAI المدفوعة).
-2. جلب الأخبار من Google News RSS (عربية + عالمية)، بحد أقصى للفحص (100 افتراضيًا).
+2. جلب الأخبار من Google News RSS (عربية + عالمية)، بحد أقصى للفحص (200 افتراضيًا).
 3. تجاوز الأخبار المُعالجة سابقًا (عبر news.db) والمصادر الممنوعة.
 4. استخراج النص الكامل والصورة البارزة من كل خبر.
 5. الترجمة (إن لزم) وإعادة الصياغة والتصنيف والعنوان عبر OpenAI.
-6. النشر كمسودة في ووردبريس، بحد أقصى للنشر (20 افتراضيًا).
+6. النشر كمسودة في ووردبريس، بحد أقصى للنشر (40 افتراضيًا).
 7. إرسال تقرير بعناوين وروابط الأخبار المنشورة إلى مجموعة تلجرام.
 """
 
@@ -36,8 +36,8 @@ def run_cycle():
         send_error_alert(error_msg)
         return
 
-    max_checked = CONFIG["fetch_settings"].get("max_articles_checked_per_cycle", 100)
-    max_published = CONFIG["fetch_settings"].get("max_articles_published_per_cycle", 20)
+    max_checked = CONFIG["fetch_settings"].get("max_articles_checked_per_cycle", 200)
+    max_published = CONFIG["fetch_settings"].get("max_articles_published_per_cycle", 40)
 
     news_items = fetch_prioritized_news()
     print(f"📰 تم جلب {len(news_items)} خبر محتمل للفحص (الحد الأقصى: {max_checked}).")
@@ -112,11 +112,7 @@ def run_cycle():
 
 
 if __name__ == "__main__":
+    # عند التشغيل عبر GitHub Actions، الجدولة (كل ساعة) تُدار من ملف الـ workflow
+    # نفسه (.github/workflows/run_bot.yml) — لذا هذا الملف ينفّذ دورة واحدة فقط
+    # في كل استدعاء، وGitHub هو من يستدعيه من جديد كل ساعة.
     run_cycle()
-    # لتشغيل دوري تلقائي كل ساعة عند التشغيل محليًا على Pydroid (غير مطلوب عند
-    # الاعتماد على GitHub Actions، فهو يستدعي run_cycle() مرة واحدة كل تشغيل):
-    #
-    # while True:
-    #     run_cycle()
-    #     print("⏳ انتظار 60 دقيقة قبل الدورة التالية...")
-    #     time.sleep(3600)
