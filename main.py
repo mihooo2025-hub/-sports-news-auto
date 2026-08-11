@@ -1,25 +1,16 @@
 """
 main.py
 =======
-الملف الرئيسي — شغّله من Pydroid 3 أو عبر GitHub Actions.
-
-يقوم بدورة كاملة:
-1. فحص المصادقة مع ووردبريس أولًا (لتفادي إهدار استدعاءات OpenAI المدفوعة).
-2. جلب الأخبار من Google News RSS (عربية + عالمية)، بحد أقصى للفحص (200 افتراضيًا).
-3. تجاوز الأخبار المُعالجة سابقًا (عبر news.db) والمصادر الممنوعة والعناوين المكررة.
-4. استخراج النص الكامل والصورة البارزة من كل خبر.
-5. الترجمة (إن لزم) وإعادة الصياغة والتصنيف والعنوان عبر OpenAI.
-6. النشر كمسودة في ووردبريس، بحد أقصى للنشر (40 افتراضيًا).
-7. إرسال تقرير بعناوين وروابط الأخبار المنشورة إلى مجموعة تلجرام.
+الملف الرئيسي لتشغيل الدورة بأسلوب الفحص الدلالي الذكي للتكرار (أحدث 40 خبراً).
 """
 
 import time
 
 from config import CONFIG
-from db import is_processed, mark_processed, is_similar_title_exists
+from db import is_processed, mark_processed, get_recent_titles
 from rss_fetcher import fetch_prioritized_news
 from article_extractor import extract_article
-from content_ai import process_article
+from content_ai import process_article, is_semantic_duplicate
 from wordpress_publisher import create_draft_post, test_authentication
 from telegram_reporter import send_cycle_report, send_error_alert
 
@@ -29,7 +20,6 @@ def run_cycle():
     print("🔄 بدء دورة جلب ونشر جديدة...")
     print("=" * 60)
 
-    # فحص المصادقة مع ووردبريس أولًا — لتفادي إهدار استدعاءات OpenAI المدفوعة
     if not test_authentication():
         error_msg = "فشلت المصادقة مع ووردبريس — تم إيقاف الدورة قبل استهلاك أي رصيد OpenAI."
         print(f"\n⛔ {error_msg}")
@@ -63,6 +53,14 @@ def run_cycle():
         checked_count += 1
         print(f"\n➡️ [{checked_count}/{max_checked}] معالجة: {title}")
 
+        # جلب أحدث 40 خبراً تم نشرهم لمقارنة المعنى الدلالي
+        recent_titles = get_recent_titles(limit=40)
+        if is_semantic_duplicate(title, recent_titles):
+            print("⏭️ تم تجاوز الخبر — الفحص الذكي أكد أنه يحمل نفس المعنى والحدث لخبر سابق.")
+            mark_processed(link, title=title, status="skipped_semantic_duplicate")
+            skipped_count += 1
+            continue
+
         article_data = extract_article(link)
 
         if article_data.get("blocked"):
@@ -88,11 +86,6 @@ def run_cycle():
             continue
 
         generated_title = ai_result.get("title", "")
-        if is_similar_title_exists(generated_title):
-            print("⏭️ تم تجاوز الخبر — يتشابه جداً مع خبر تم نشره مؤخراً.")
-            mark_processed(link, title=generated_title, status="skipped_duplicate_title")
-            skipped_count += 1
-            continue
 
         post_data = create_draft_post(
             ai_result=ai_result,
@@ -111,7 +104,7 @@ def run_cycle():
             mark_processed(link, title=generated_title, status="skipped_wp_failed")
             skipped_count += 1
 
-        time.sleep(2)  # مهلة بسيطة بين الطلبات
+        time.sleep(2)
 
     print(f"\n✅ انتهت الدورة — نُشر {len(published_items)} مسودة، فُحص {checked_count}، تُجووِز {skipped_count}.")
 
