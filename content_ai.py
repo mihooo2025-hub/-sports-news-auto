@@ -8,6 +8,7 @@ content_ai.py
 """
 
 import json
+import re
 from difflib import SequenceMatcher
 from openai import OpenAI
 from config import CONFIG
@@ -63,47 +64,58 @@ SYSTEM_PROMPT = f"""أنت محرر رياضي محترف متخصص في أخب
 
 def is_semantic_duplicate(new_title: str, recent_titles: list[str]) -> bool:
     """
-    1. يعتمد أولاً على الفحص النصي الابتدائي عبر بايثون (SequenceMatcher).
-    2. إذا كانت نسبة التشابه المباشرة عالية جدًا (>= 85%)، يعتبره مكرراً فوراً.
-    3. إذا كانت نسبة التشابه متقاربة (بين 35% و 85%)، يرسل المقارنة لـ OpenAI للمراجعة والحسم دلالياً.
-    4. إذا كانت النسبة ضئيلة جداً (< 35%)، يمرره مباشرة كخبر جديد.
+    يفحص التكرار مع مراعاة عدم استبعاد الأخبار التي تحمل تفاصيل أو تطورات جديدة.
     """
     if not recent_titles or not new_title:
         return False
 
     new_title_clean = new_title.strip()
+    
+    # استخراج الكلمات الأساسية (تجاوز الكلمات القصيرة وأدوات الربط)
+    new_words = set(re.findall(r'\w{3,}', new_title_clean.lower()))
+    
     suspicious_titles = []
 
-    # الفحص الأولي عبر بايثون
     for old_title in recent_titles:
         old_title_clean = old_title.strip()
+        
+        # 1. مطابقة نصية شبه متطابقة حرفياً (90% فأكثر)
         ratio = SequenceMatcher(None, new_title_clean, old_title_clean).ratio()
-
-        # تطابق نصي شبه كامل -> مكرر فوراً دون استدعاء الذكاء الاصطناعي
-        if ratio >= 0.85:
-            print(f"⚠️ تكرار نصي مؤكد عبر بايثون بنسبة {int(ratio*100)}%: {new_title_clean}")
+        if ratio >= 0.90:
+            print(f"⚠️ تكرار نصي مؤكد بنسبة {int(ratio*100)}%: {new_title_clean}")
             return True
 
-        # تشابه متوسط -> يوضع في قائمة المشتبه بهم لمراجعة الذكاء الاصطناعي
-        if ratio >= 0.35:
+        # 2. فحص تقاطع الكلمات الأساسية
+        old_words = set(re.findall(r'\w{3,}', old_title_clean.lower()))
+        common_words = new_words.intersection(old_words)
+        
+        # تحويل للذكاء الاصطناعي فقط إذا كان هناك تقاطع عالي في الكلمات (3 كلمات رئيسية أو نسبة تشابه >= 40%)
+        if len(common_words) >= 3 or ratio >= 0.40:
             suspicious_titles.append(old_title_clean)
 
-    # إذا لم يجد بايثون أي تقارب نصي، الخبر جديد 100% ولا حاجة للذكاء الاصطناعي
+    # إذا لم يستوفِ شروط الاشتباه، يعتبر خبراً جديداً فوراً
     if not suspicious_titles:
         return False
 
-    # مراجعة الذكاء الاصطناعي للعناوين المشتبه بها فقط
-    prompt = f"""أنت محرر رياضي خبير. قارن "العنوان الجديد" مع العناوين المشتبه بها فقط، واذكر ما إذا كان العنوان الجديد يحمل "نفس المعنى أو الحدث الأساسي" لأي منها بغض النظر عن اختلاف الصياغة أو المرادفات.
+    suspicious_titles = suspicious_titles[:8]
 
-العنوان الجديد:
+    prompt = f"""أنت محرر رياضي خبير وميزانك دقيق جداً. مهمتك هي التمييز بين "الخبر المكرر بنفس التفاصيل" و "الخبر الجديد أو التطور البرمجي/التصريحي".
+
+العنوان الجديد المراد فحصه:
 "{new_title_clean}"
 
-العناوين المشتبه بتشابهها:
+العناوين المنشورة سابقاً:
 {json.dumps(suspicious_titles, ensure_ascii=False)}
 
-أجب بـ JSON فقط بالتنسيق التالي:
-{{"duplicate": true}} إذا كان يحمل نفس المعنى والحدث أو يتناول نفس الموضوع بمرادفات وصياغة مختلفة.
-{{"duplicate": false}} إذا كان خبراً جديداً بحدث مختلف أو تفاصيل جديدة كلياً.
+قواعد التقييم:
+1. يعتبر [مكرر - duplicate: true] فقط إذا كان العنوان الجديد يعيد صياغة نفس الواقعة أو نفس الحدث دون إدخال أي زاوية أو معلومة جديدة.
+   - مثال للمكرر: "رودري يرفض ريال مدريد" مقارنة بـ "3 أسباب تجعل رودري يرفض مدريد".
+
+2. يعتبر [غير مكرر - duplicate: false] إذا كان الخبر يحتوي على تحديث، تصريح مختلف، رد فعل جديد، أرقام جديدة، أو واقعة أخرى لنفس اللاعب/النادي.
+   - مثال لغير المكرر: "رودري يرفض مدريد" مقارنة بـ "موقف ريال مدريد بعد رفض رودري" أو "رودري يوضح سبب رفضه لمدريد".
+
+أجب بصيغة JSON فقط بالتنسيق التالي:
+{{"duplicate": true}} أو {{"duplicate": false}}
 """
 
     try:
@@ -114,9 +126,12 @@ def is_semantic_duplicate(new_title: str, recent_titles: list[str]) -> bool:
             response_format={"type": "json_object"},
         )
         res = json.loads(response.choices[0].message.content)
-        return res.get("duplicate", False)
+        is_dup = res.get("duplicate", False)
+        if is_dup:
+            print(f"⚠️ تم حجب الخبر لأنه مكرر تماماً: {new_title_clean}")
+        return is_dup
     except Exception as e:
-        print(f"⚠️ فشل فحص المراجعة عبر الذكاء الاصطناعي: {e}")
+        print(f"⚠️ خطأ في فحص الذكاء الاصطناعي: {e}")
         return False
 
 
