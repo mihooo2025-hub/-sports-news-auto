@@ -1,7 +1,7 @@
 """
 main.py
 =======
-الملف الرئيسي لتشغيل الدورة بأسلوب الفحص الدلالي الذكي للتكرار (أحدث 40 خبراً).
+الملف الرئيسي لتشغيل الدورة بأسلوب الفحص النصي الأولي والمراجعة الذكية للحد من التكرار.
 """
 
 import time
@@ -53,10 +53,10 @@ def run_cycle():
         checked_count += 1
         print(f"\n➡️ [{checked_count}/{max_checked}] معالجة: {title}")
 
-        # جلب أحدث 40 خبراً تم نشرهم لمقارنة المعنى الدلالي
+        # الفحص النصي الأولي مع المراجعة الذكية لأحدث 40 خبراً
         recent_titles = get_recent_titles(limit=40)
         if is_semantic_duplicate(title, recent_titles):
-            print("⏭️ تم تجاوز الخبر — الفحص الذكي أكد أنه يحمل نفس المعنى والحدث لخبر سابق.")
+            print("⏭️ تم تجاوز الخبر — الفحص أثبت وجود خبر مكرر بالكلمات أو بنفس المعنى.")
             mark_processed(link, title=title, status="skipped_semantic_duplicate")
             skipped_count += 1
             continue
