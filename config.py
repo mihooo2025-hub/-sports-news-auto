@@ -30,9 +30,10 @@ def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    # تطغى متغيرات البيئة على قيم config.json الخاصة ببيانات الاعتماد الحساسة فقط
-    # (تشغيل عبر GitHub Actions لا يحتاج كتابة الأسرار داخل الملف نفسه).
+    # تطغى متغيرات البيئة على قيم config.json الخاصة ببيانات الاعتماد الحساسة ورابط الموقع
+    # (تشغيل عبر GitHub Actions لا يحتاج كتابة الأسرار أو الرابط داخل الملف نفسه).
     env_map = {
+        ("wordpress", "site_url"): "WP_SITE_URL",
         ("wordpress", "username"): "WP_USERNAME",
         ("wordpress", "app_password"): "WP_APP_PASSWORD",
         ("openai", "api_key"): "OPENAI_API_KEY",
