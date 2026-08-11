@@ -6,7 +6,7 @@ main.py
 يقوم بدورة كاملة:
 1. فحص المصادقة مع ووردبريس أولًا (لتفادي إهدار استدعاءات OpenAI المدفوعة).
 2. جلب الأخبار من Google News RSS (عربية + عالمية)، بحد أقصى للفحص (200 افتراضيًا).
-3. تجاوز الأخبار المُعالجة سابقًا (عبر news.db) والمصادر الممنوعة.
+3. تجاوز الأخبار المُعالجة سابقًا (عبر news.db) والمصادر الممنوعة والعناوين المكررة.
 4. استخراج النص الكامل والصورة البارزة من كل خبر.
 5. الترجمة (إن لزم) وإعادة الصياغة والتصنيف والعنوان عبر OpenAI.
 6. النشر كمسودة في ووردبريس، بحد أقصى للنشر (40 افتراضيًا).
@@ -16,7 +16,7 @@ main.py
 import time
 
 from config import CONFIG
-from db import is_processed, mark_processed
+from db import is_processed, mark_processed, is_similar_title_exists
 from rss_fetcher import fetch_prioritized_news
 from article_extractor import extract_article
 from content_ai import process_article
@@ -87,6 +87,13 @@ def run_cycle():
             skipped_count += 1
             continue
 
+        generated_title = ai_result.get("title", "")
+        if is_similar_title_exists(generated_title):
+            print("⏭️ تم تجاوز الخبر — يتشابه جداً مع خبر تم نشره مؤخراً.")
+            mark_processed(link, title=generated_title, status="skipped_duplicate_title")
+            skipped_count += 1
+            continue
+
         post_data = create_draft_post(
             ai_result=ai_result,
             source_url=article_data["resolved_url"],
@@ -94,14 +101,14 @@ def run_cycle():
         )
 
         if post_data:
-            mark_processed(link, title=title, wp_post_id=post_data.get("id"), status="published_draft")
+            mark_processed(link, title=generated_title, wp_post_id=post_data.get("id"), status="published_draft")
             published_items.append({
-                "title": ai_result["title"],
+                "title": generated_title,
                 "source_url": article_data["resolved_url"],
                 "wp_link": post_data.get("link", ""),
             })
         else:
-            mark_processed(link, title=title, status="skipped_wp_failed")
+            mark_processed(link, title=generated_title, status="skipped_wp_failed")
             skipped_count += 1
 
         time.sleep(2)  # مهلة بسيطة بين الطلبات
@@ -112,7 +119,4 @@ def run_cycle():
 
 
 if __name__ == "__main__":
-    # عند التشغيل عبر GitHub Actions، الجدولة (كل ساعة) تُدار من ملف الـ workflow
-    # نفسه (.github/workflows/run_bot.yml) — لذا هذا الملف ينفّذ دورة واحدة فقط
-    # في كل استدعاء، وGitHub هو من يستدعيه من جديد كل ساعة.
     run_cycle()
