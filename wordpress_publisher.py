@@ -12,10 +12,6 @@ import requests
 from requests.auth import HTTPBasicAuth
 from config import CONFIG
 
-WP = CONFIG["wordpress"]
-SITE_URL = WP["site_url"].rstrip("/")
-AUTH = HTTPBasicAuth(WP["username"], WP["app_password"])
-
 HEADERS_JSON = {"Content-Type": "application/json"}
 HEADERS_IMAGE = {
     "User-Agent": (
@@ -27,15 +23,23 @@ HEADERS_IMAGE = {
 _category_cache = {}
 
 
+def _get_wp_credentials():
+    wp = CONFIG.get("wordpress", {})
+    site_url = wp.get("site_url", "").rstrip("/")
+    auth = HTTPBasicAuth(wp.get("username", ""), wp.get("app_password", ""))
+    return site_url, auth, wp.get("username", "")
+
+
 def test_authentication() -> bool:
     """
     Validates WordPress credentials before processing to avoid wasting API quota.
     """
+    site_url, auth, username = _get_wp_credentials()
     try:
-        resp = requests.get(f"{SITE_URL}/wp-json/wp/v2/users/me", auth=AUTH, timeout=10)
+        resp = requests.get(f"{site_url}/wp-json/wp/v2/users/me", auth=auth, timeout=10)
         if resp.status_code == 200:
             user_data = resp.json()
-            print(f"✅ WordPress authentication successful — User: {user_data.get('name', WP['username'])}")
+            print(f"✅ WordPress authentication successful — User: {user_data.get('name', username)}")
             return True
 
         print(f"❌ WordPress authentication failed (Status code: {resp.status_code}).")
@@ -64,11 +68,13 @@ def _get_category_id(name: str) -> int | None:
     if name in _category_cache:
         return _category_cache[name]
 
+    site_url, auth, _ = _get_wp_credentials()
+
     try:
         resp = requests.get(
-            f"{SITE_URL}/wp-json/wp/v2/categories",
+            f"{site_url}/wp-json/wp/v2/categories",
             params={"search": name, "per_page": 5},
-            auth=AUTH,
+            auth=auth,
             timeout=10,
         )
         resp.raise_for_status()
@@ -99,6 +105,8 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
     if not image_url:
         return None
 
+    site_url, auth, _ = _get_wp_credentials()
+
     try:
         img_resp = requests.get(image_url, headers=HEADERS_IMAGE, timeout=15)
         img_resp.raise_for_status()
@@ -116,8 +124,8 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
         filename = f"featured-{abs(hash(image_url)) % 10**8}.{ext}"
 
         upload_resp = requests.post(
-            f"{SITE_URL}/wp-json/wp/v2/media",
-            auth=AUTH,
+            f"{site_url}/wp-json/wp/v2/media",
+            auth=auth,
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "Content-Type": content_type,
@@ -131,8 +139,8 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
 
         if alt_text:
             requests.post(
-                f"{SITE_URL}/wp-json/wp/v2/media/{media_id}",
-                auth=AUTH,
+                f"{site_url}/wp-json/wp/v2/media/{media_id}",
+                auth=auth,
                 json={"alt_text": alt_text},
                 headers=HEADERS_JSON,
                 timeout=10,
@@ -147,6 +155,7 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
 
 def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict | None:
     main_title = ai_result["title"]
+    site_url, auth, _ = _get_wp_credentials()
 
     media_id = upload_featured_image(image_url, alt_text=main_title)
     category_ids = resolve_category_ids(ai_result.get("categories", []))
@@ -162,8 +171,8 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
 
     try:
         resp = requests.post(
-            f"{SITE_URL}/wp-json/wp/v2/posts",
-            auth=AUTH,
+            f"{site_url}/wp-json/wp/v2/posts",
+            auth=auth,
             json=post_payload,
             headers=HEADERS_JSON,
             timeout=15,
