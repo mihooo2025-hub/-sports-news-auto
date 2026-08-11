@@ -1,68 +1,65 @@
-{
-  "wordpress": {
-    "site_url": "https://nabdalmalaeb.com",
-    "username": "PASTE_YOUR_USERNAME_HERE",
-    "app_password": "PASTE_YOUR_APP_PASSWORD_HERE"
-  },
-  "openai": {
-    "api_key": "PASTE_YOUR_OPENAI_KEY_HERE",
-    "model": "gpt-4o-mini"
-  },
-  "telegram": {
-    "bot_token": "PASTE_YOUR_TELEGRAM_BOT_TOKEN_HERE",
-    "chat_id": "PASTE_YOUR_TELEGRAM_GROUP_CHAT_ID_HERE"
-  },
-  "fetch_settings": {
-    "max_article_age_hours": 12,
-    "max_articles_checked_per_cycle": 200,
-    "max_articles_published_per_cycle": 40,
-    "language": "ar",
-    "country": "EG"
-  },
-  "global_sources": {
-    "enabled": true,
-    "note": "يضيف بحثًا بلغات/دول إضافية لجلب مصادر عالمية مثل Marca وSport وESPN. تُترجم النصوص تلقائيًا للعربية أثناء إعادة الصياغة.",
-    "locales": [
-      { "language": "en", "country": "US" },
-      { "language": "es", "country": "ES" }
-    ]
-  },
-  "blocked_domains": [
-    "hihi2.com",
-    "alwasat.ly"
-  ],
-  "priority_keywords": [
-    "ريال مدريد",
-    "برشلونة"
-  ],
-  "league_keywords": [
-    "الدوري الاسباني",
-    "الدوري الانجليزي الممتاز",
-    "الدوري الايطالي",
-    "الدوري الالماني",
-    "الدوري الفرنسي"
-  ],
-  "general_keywords": [
-    "سوق الانتقالات كرة القدم",
-    "اخبار كرة القدم"
-  ],
-  "categories": [
-    "مقالات وتحليلات",
-    "اهم الاخبار",
-    "سوق الانتقالات",
-    "ريال مدريد",
-    "برشلونه",
-    "ليفربول",
-    "مانشستر يونايتد",
-    "مانشستر سيتي",
-    "تشلسي",
-    "ارسنال",
-    "بايرن ميونخ",
-    "باريس سان جرمان",
-    "ميلان",
-    "يوفنتوس",
-    "انتر ميلان",
-    "بروسيا دورتموند",
-    "اتليتكو مدريد"
-  ]
-}
+"""
+config.py
+=========
+يحمّل إعدادات التطبيق من config.json مع دمج المتغيرات البيئية (Environment Variables / GitHub Secrets).
+"""
+
+import json
+import os
+
+CONFIG_FILE = "config.json"
+
+
+def load_config():
+    config = {}
+
+    # 1. قراءة الملف الأساسي إذا كان موجوداً
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception as e:
+            print(f"⚠️ تعذر قراءة {CONFIG_FILE}: {e}")
+
+    # التأكد من وجود الهياكل الرئيسية في القاموس
+    if "wordpress" not in config:
+        config["wordpress"] = {}
+    if "openai" not in config:
+        config["openai"] = {}
+    if "telegram" not in config:
+        config["telegram"] = {}
+
+    # 2. استبدال القيم/الأسرار من المتغيرات البيئية (GitHub Secrets) إن وجدت
+
+    # WordPress Settings
+    wp_site_url = os.getenv("WP_SITE_URL")
+    if wp_site_url:
+        config["wordpress"]["site_url"] = wp_site_url.rstrip("/")
+
+    wp_username = os.getenv("WP_USERNAME")
+    if wp_username:
+        config["wordpress"]["username"] = wp_username
+
+    wp_app_password = os.getenv("WP_APP_PASSWORD")
+    if wp_app_password:
+        config["wordpress"]["app_password"] = wp_app_password
+
+    # OpenAI Settings
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key:
+        config["openai"]["api_key"] = openai_key
+
+    # Telegram Settings
+    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if telegram_token:
+        config["telegram"]["bot_token"] = telegram_token
+
+    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if telegram_chat_id:
+        config["telegram"]["chat_id"] = telegram_chat_id
+
+    return config
+
+
+# كائن الإعدادات الجاهز للاستيراد في باقي الملفات
+CONFIG = load_config()
