@@ -1,12 +1,12 @@
 """
 telegram_reporter.py
 =====================
-يرسل تقريرًا إلى مجموعة تلجرام عبر بوت بعد كل دورة تشغيل، يحتوي:
-- عنوان كل خبر أُعيدت صياغته ونُشر.
-- رابط الخبر الأصلي الذي نُقل منه.
+Sends a summary report to a Telegram group via Bot after each execution cycle:
+- Titles of rewritten and published articles.
+- Links to original source articles.
 
-يحتاج توكن بوت تلجرام (من BotFather) ومعرّف المجموعة (chat_id) في config.json
-أو عبر متغيرات البيئة TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID.
+Requires Telegram Bot Token (from BotFather) and Group ID (chat_id) in config.json
+or provided via environment variables (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).
 """
 
 import requests
@@ -17,7 +17,7 @@ BOT_TOKEN = TG.get("bot_token", "")
 CHAT_ID = TG.get("chat_id", "")
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-MAX_MESSAGE_LENGTH = 3800  # هامش أمان تحت حد تلجرام (4096 حرفًا)
+MAX_MESSAGE_LENGTH = 3800  # Safety buffer below Telegram's 4096 limit
 
 
 def _is_configured() -> bool:
@@ -39,12 +39,12 @@ def _send_message(text: str) -> bool:
         resp.raise_for_status()
         return True
     except Exception as e:
-        print(f"⚠️ فشل إرسال تقرير تلجرام: {e}")
+        print(f"⚠️ Failed to send Telegram report: {e}")
         return False
 
 
 def _chunk_message(lines: list, header: str) -> list:
-    """يقسّم قائمة الأسطر إلى رسائل متعددة إذا تجاوزت حد تلجرام."""
+    """Splits message lines into multiple chunks if exceeding Telegram length limits."""
     chunks = []
     current = header
     for line in lines:
@@ -60,23 +60,21 @@ def _chunk_message(lines: list, header: str) -> list:
 
 def send_cycle_report(published_items: list, checked_count: int, skipped_count: int):
     """
-    published_items: قائمة dict فيها {"title": عنوان المقال المُعاد صياغته,
-                                        "source_url": رابط الخبر الأصلي,
-                                        "wp_link": رابط المسودة في ووردبريس (اختياري)}
+    published_items: list of dicts {"title": article title, "source_url": original url}
     """
     if not _is_configured():
-        print("ℹ️ لم يتم إعداد تلجرام (bot_token/chat_id) — تم تخطي إرسال التقرير.")
+        print("ℹ️ Telegram credentials not configured — skipping report dispatch.")
         return
 
     if not published_items:
         _send_message(
-            f"📊 <b>تقرير دورة نبض الملاعب</b>\n\n"
+            f"📊 <b>تقرير دورة الأخبار</b>\n\n"
             f"تم فحص {checked_count} خبر، ولم يُنشر أي خبر جديد في هذه الدورة."
         )
         return
 
     header = (
-        f"📊 <b>تقرير دورة نبض الملاعب</b>\n"
+        f"📊 <b>تقرير دورة الأخبار</b>\n"
         f"✅ نُشر: {len(published_items)} | 🔍 فُحص: {checked_count} | ⏭️ تُجووِز: {skipped_count}\n"
     )
 
@@ -91,7 +89,7 @@ def send_cycle_report(published_items: list, checked_count: int, skipped_count: 
 
 
 def send_error_alert(message: str):
-    """يُستخدم لإرسال تنبيه فوري عند فشل حرج (مثل فشل المصادقة مع ووردبريس)."""
+    """Sends an immediate error notification upon critical failure."""
     if not _is_configured():
         return
-    _send_message(f"⛔ <b>تنبيه خطأ — نبض الملاعب</b>\n\n{message}")
+    _send_message(f"⛔ <b>تنبيه خطأ — نظام الأخبار</b>\n\n{message}")
