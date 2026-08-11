@@ -1,11 +1,11 @@
 """
 wordpress_publisher.py
 =======================
-- يتحقق من صحة بيانات الاعتماد قبل أي معالجة (test_authentication).
-- يرفع الصورة البارزة إلى مكتبة الوسائط.
-- يحل أسماء التصنيفات إلى أرقام IDs عبر REST API (مع تخزين مؤقت محلي).
-  لا يُنشئ أي تصنيف جديد أبدًا — إذا لم يجد تطابقًا، يُترك الخبر بلا هذا التصنيف.
-- ينشئ المقال كمسودة (Draft) مع تعيين الصورة البارزة والتصنيفات.
+- Validates credentials before processing (test_authentication).
+- Uploads featured image to WordPress Media Library.
+- Resolves category names to Category IDs via WordPress REST API.
+  Never creates new categories — if no match is found, the category is omitted.
+- Creates post draft with featured image and resolved categories.
 """
 
 import requests
@@ -29,39 +29,37 @@ _category_cache = {}
 
 def test_authentication() -> bool:
     """
-    يتحقق من صحة بيانات الاعتماد قبل بدء أي معالجة، لتفادي إهدار استدعاءات
-    OpenAI (وتكلفتها) على مقالات ستفشل حتمًا عند محاولة نشرها لاحقًا.
+    Validates WordPress credentials before processing to avoid wasting API quota.
     """
     try:
         resp = requests.get(f"{SITE_URL}/wp-json/wp/v2/users/me", auth=AUTH, timeout=10)
         if resp.status_code == 200:
             user_data = resp.json()
-            print(f"✅ تم التحقق من الاتصال بووردبريس بنجاح — المستخدم: {user_data.get('name', WP['username'])}")
+            print(f"✅ WordPress authentication successful — User: {user_data.get('name', WP['username'])}")
             return True
 
-        print(f"❌ فشلت المصادقة مع ووردبريس (كود: {resp.status_code}).")
+        print(f"❌ WordPress authentication failed (Status code: {resp.status_code}).")
         if resp.status_code == 401:
             print(
-                "الأسباب المحتملة:\n"
-                "  1) كلمة مرور Application Password قديمة/ملغاة — أنشئ واحدة جديدة وحدّثها.\n"
-                "  2) خطأ في النسخ (مسافة ناقصة أو حرف مفقود).\n"
-                "  3) اسم المستخدم غير مطابق للاسم الفعلي في ووردبريس.\n"
-                "  4) (نادر) الاستضافة تحذف رأس Authorization."
+                "Possible reasons:\n"
+                "  1) Application Password expired/invalid — generate a new one.\n"
+                "  2) Typo in credentials.\n"
+                "  3) Username mismatch.\n"
+                "  4) Server/Hosting stripping Authorization header."
             )
         else:
-            print(f"تفاصيل: {resp.text[:300]}")
+            print(f"Details: {resp.text[:300]}")
         return False
 
     except Exception as e:
-        print(f"❌ تعذر الاتصال بموقع ووردبريس إطلاقًا: {e}")
+        print(f"❌ Connection to WordPress failed: {e}")
         return False
 
 
 def _get_category_id(name: str) -> int | None:
     """
-    يبحث عن تصنيف موجود فعليًا في ووردبريس بنفس الاسم تمامًا.
-    لا يقوم بإنشاء أي تصنيف جديد مطلقًا — إذا لم يجد تطابقًا، يُعيد None
-    ويُترك الخبر بلا هذا التصنيف بدل إنشاء تصنيف مكرر أو جديد.
+    Looks up an existing category ID by name.
+    Does not create new categories — returns None if not found.
     """
     if name in _category_cache:
         return _category_cache[name]
@@ -79,11 +77,11 @@ def _get_category_id(name: str) -> int | None:
                 _category_cache[name] = cat["id"]
                 return cat["id"]
 
-        print(f"⚠️ التصنيف '{name}' غير موجود فعليًا في ووردبريس — سيُنشر الخبر بدونه (لن يُنشأ تصنيف جديد).")
+        print(f"⚠️ Category '{name}' not found in WordPress — post will be created without it.")
         return None
 
     except Exception as e:
-        print(f"⚠️ فشل البحث عن التصنيف '{name}': {e}")
+        print(f"⚠️ Category search failed for '{name}': {e}")
 
     return None
 
@@ -106,7 +104,7 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
         img_resp.raise_for_status()
         content_type = img_resp.headers.get("Content-Type", "image/jpeg")
         if "image" not in content_type:
-            print(f"⚠️ الرابط لا يحتوي صورة صالحة (Content-Type: {content_type})")
+            print(f"⚠️ URL does not contain valid image data (Content-Type: {content_type})")
             return None
 
         ext = "jpg"
@@ -143,7 +141,7 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
         return media_id
 
     except Exception as e:
-        print(f"⚠️ فشل رفع الصورة البارزة: {e}")
+        print(f"⚠️ Featured image upload failed: {e}")
         return None
 
 
@@ -172,10 +170,10 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
         )
         resp.raise_for_status()
         post_data = resp.json()
-        print(f"✅ تم إنشاء المسودة: {post_data.get('link', post_data.get('id'))}")
+        print(f"✅ Draft created successfully: {post_data.get('link', post_data.get('id'))}")
         return post_data
     except Exception as e:
-        print(f"❌ فشل إنشاء المقال في ووردبريس: {e}")
+        print(f"❌ Failed to create WordPress post: {e}")
         if hasattr(e, "response") and e.response is not None:
-            print(f"تفاصيل الخطأ: {e.response.text[:500]}")
+            print(f"Error details: {e.response.text[:500]}")
         return None
