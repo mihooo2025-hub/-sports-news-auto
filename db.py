@@ -9,7 +9,6 @@ import sqlite3
 import os
 import hashlib
 from datetime import datetime
-from difflib import SequenceMatcher
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "news.db")
 
@@ -45,22 +44,19 @@ def is_processed(url: str) -> bool:
     return result is not None
 
 
-def is_similar_title_exists(new_title: str, threshold: float = 0.65) -> bool:
+def get_recent_titles(limit: int = 40) -> list[str]:
     """
-    يفحص ما إذا كان هناك عنوان مُعالج سابقاً يشبه العنوان الجديد بنسبة تتجاوز threshold.
+    يجلب أحدث 40 عنواناً منشوراً من قاعدة البيانات لمقارنتها دلالياً.
     """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT title FROM processed_news WHERE title IS NOT NULL AND title != '' ORDER BY id DESC LIMIT 100")
+    cur.execute(
+        "SELECT title FROM processed_news WHERE title IS NOT NULL AND title != '' AND status LIKE 'published%' ORDER BY id DESC LIMIT ?",
+        (limit,),
+    )
     rows = cur.fetchall()
     conn.close()
-
-    for (old_title,) in rows:
-        ratio = SequenceMatcher(None, new_title.strip(), old_title.strip()).ratio()
-        if ratio >= threshold:
-            print(f"⚠️ تم اكتشاف خبر مكرر بالفكرة:\n   - الجديد: {new_title}\n   - القديم: {old_title}\n   - نسبة التشابه: {int(ratio*100)}%")
-            return True
-    return False
+    return [r[0] for r in rows]
 
 
 def mark_processed(url: str, title: str = "", wp_post_id: int = None, status: str = "published"):
