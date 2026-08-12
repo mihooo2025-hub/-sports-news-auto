@@ -12,14 +12,28 @@ import requests
 from requests.auth import HTTPBasicAuth
 from config import CONFIG
 
-# User-Agent محاكي لمتصفح حقيقي لتفادي حظر البوتات و Bot Verification 403
-HEADERS_WP = {
+# هيدرات الطلبات العادية (GET) - متصفح حقيقي وقبول البيانات
+HEADERS_GET = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+}
+
+# هيدرات طلبات إرسال البيانات (POST JSON)
+HEADERS_JSON = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
 }
+
+# توافقية مع اسم المتغير القديم
+HEADERS_WP = HEADERS_JSON
 
 HEADERS_IMAGE = {
     "User-Agent": (
@@ -47,7 +61,7 @@ def test_authentication() -> bool:
         resp = requests.get(
             f"{site_url}/wp-json/wp/v2/users/me",
             auth=auth,
-            headers=HEADERS_WP,
+            headers=HEADERS_GET,
             timeout=10,
         )
         if resp.status_code == 200:
@@ -88,7 +102,7 @@ def _get_category_id(name: str) -> int | None:
             f"{site_url}/wp-json/wp/v2/categories",
             params={"search": name, "per_page": 5},
             auth=auth,
-            headers=HEADERS_WP,
+            headers=HEADERS_GET,
             timeout=10,
         )
         resp.raise_for_status()
@@ -141,7 +155,7 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
             f"{site_url}/wp-json/wp/v2/media",
             auth=auth,
             headers={
-                "User-Agent": HEADERS_WP["User-Agent"],
+                "User-Agent": HEADERS_GET["User-Agent"],
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "Content-Type": content_type,
             },
@@ -157,7 +171,7 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
                 f"{site_url}/wp-json/wp/v2/media/{media_id}",
                 auth=auth,
                 json={"alt_text": alt_text},
-                headers=HEADERS_WP,
+                headers=HEADERS_JSON,
                 timeout=10,
             )
 
@@ -189,7 +203,7 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
             f"{site_url}/wp-json/wp/v2/posts",
             auth=auth,
             json=post_payload,
-            headers=HEADERS_WP,
+            headers=HEADERS_JSON,
             timeout=15,
         )
         resp.raise_for_status()
