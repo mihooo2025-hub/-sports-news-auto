@@ -22,8 +22,9 @@
   "global_sources": {
     "enabled": true,
     "locales": [
-      { "language": "en", "country": "US" },
-      { "language": "es", "country": "ES" }
+      { "language": "es", "country": "ES" },
+      { "language": "en", "country": "GB" },
+      { "language": "en", "country": "US" }
     ]
   },
   "blocked_domains": [
@@ -31,10 +32,17 @@
     "alwasat.ly"
   ],
   "priority_keywords": [
+    "Real Madrid",
+    "FC Barcelona",
     "ريال مدريد",
     "برشلونة"
   ],
   "league_keywords": [
+    "La Liga",
+    "Premier League",
+    "Serie A",
+    "Bundesliga",
+    "Ligue 1",
     "الدوري الاسباني",
     "الدوري الانجليزي الممتاز",
     "الدوري الايطالي",
@@ -42,6 +50,8 @@
     "الدوري الفرنسي"
   ],
   "general_keywords": [
+    "Transfer news",
+    "Fichajes",
     "سوق الانتقالات كرة القدم",
     "اخبار كرة القدم"
   ],
