@@ -4,6 +4,7 @@ rss_fetcher.py
 يجلب أخبار كرة القدم من Google News RSS بلغتين أو أكثر (عربية دائمًا + مصادر
 عالمية اختيارية مثل Marca وSport وESPN حسب locales المحددة في config.json)، حسب:
 - كلمات مفتاحية بالأولوية (ريال مدريد وبرشلونة أولًا، ثم الدوريات الكبرى، ثم العام)
+- فرز أحدث الأخبار زمنياً أولاً لكل مستوى أولوية
 - فلترة زمنية: آخر 12 ساعة فقط
 - استبعاد صارم لأي رياضة غير كرة القدم (بعدة لغات)
 - سقف أقصى لعدد الأخبار المفحوصة في كل دورة (افتراضيًا 100)
@@ -31,7 +32,6 @@ EXCLUDED_SPORTS_KEYWORDS = [
 ]
 
 # مؤهل "كرة القدم" حسب لغة البحث، يُستخدم فقط للكلمات العامة/الدوريات
-# التي قد تشترك فيها رياضات أخرى (وليس لأسماء الأندية الواضحة أصلًا)
 FOOTBALL_QUALIFIER_BY_LANGUAGE = {
     "ar": "كرة القدم",
     "en": "football",
@@ -84,10 +84,15 @@ def fetch_news_for_keyword(
             continue
         if not _is_recent(entry, max_age_hours):
             continue
+
+        published_parsed = entry.get("published_parsed")
+        published_dt = datetime(*published_parsed[:6], tzinfo=timezone.utc) if published_parsed else datetime.min.replace(tzinfo=timezone.utc)
+
         results.append({
             "title": title,
             "link": link,
             "published": entry.get("published", ""),
+            "published_dt": published_dt,  # أضيف لاستخدامه في الفرز الزمني
             "source": entry.get("source", {}).get("title", "") if entry.get("source") else "",
             "matched_keyword": keyword,
             "search_language": language,
@@ -112,48 +117,58 @@ def _build_locales_list() -> list:
 
 def fetch_prioritized_news() -> list:
     """
-    يجلب الأخبار بالترتيب: العربية أولًا (أولوية قصوى -> دوريات -> عام)،
-    ثم المصادر العالمية بنفس الترتيب، مع الحفاظ على هذا الترتيب في القائمة
-    المُعادة (المهم أولاً)، وسقف أقصى لعدد الأخبار المفحوصة الكلي.
+    يجلب الأخبار بالترتيب الصارم للأولويات:
+    1. أولوية الكلمات المفتاحية (الأندية أولاً ثم الدوريات ثم العام).
+    2. فرز المقالات داخل كل مستوى لترتيب الأحدث زمنياً أولاً (Recency).
+    3. أولوية المصادر (العربية أولاً ثم المصادر العالمية).
     """
     settings = CONFIG["fetch_settings"]
     max_age = settings["max_article_age_hours"]
     max_checked = settings.get("max_articles_checked_per_cycle", 100)
 
-    ordered_keywords = (
-        # أسماء الأندية واضحة أصلًا ولا تحتاج مؤهل كرة القدم
-        [(kw, False) for kw in CONFIG["priority_keywords"]]
-        # أسماء الدوريات تحتاج المؤهل للتمييز عن رياضات أخرى
-        + [(kw, True) for kw in CONFIG["league_keywords"]]
-        # الكلمات العامة (المؤهل يُضاف فقط إن لم تكن موجودة أصلًا في النص)
-        + [(kw, True) for kw in CONFIG["general_keywords"]]
-    )
+    keyword_groups = [
+        # المجموعة الأولى: الأندية والكلمات عالية الأولوية
+        ([(kw, False) for kw in CONFIG["priority_keywords"]]),
+        # المجموعة الثانية: الدوريات والبطولات
+        ([(kw, True) for kw in CONFIG["league_keywords"]]),
+        # المجموعة الثالثة: الكلمات العامة
+        ([(kw, True) for kw in CONFIG["general_keywords"]]),
+    ]
 
     locales = _build_locales_list()
-
     all_news = []
     seen_links = set()
 
-    for locale in locales:
-        lang = locale["language"]
-        country = locale["country"]
+    # المرور على مجموعات الكلمات المفتاحية حسب الترتيب العالي
+    for group in keyword_groups:
+        group_items = []
 
-        for keyword, add_qualifier in ordered_keywords:
-            if len(all_news) >= max_checked:
-                return all_news[:max_checked]
+        for locale in locales:
+            lang = locale["language"]
+            country = locale["country"]
 
-            try:
-                items = fetch_news_for_keyword(keyword, max_age, lang, country, add_qualifier)
-            except Exception as e:
-                print(f"⚠️ فشل جلب أخبار الكلمة '{keyword}' ({lang}-{country}): {e}")
-                continue
-
-            for item in items:
-                if item["link"] in seen_links:
+            for keyword, add_qualifier in group:
+                try:
+                    items = fetch_news_for_keyword(keyword, max_age, lang, country, add_qualifier)
+                    for item in items:
+                        if item["link"] not in seen_links:
+                            seen_links.add(item["link"])
+                            group_items.append(item)
+                except Exception as e:
+                    print(f"⚠️ فشل جلب أخبار الكلمة '{keyword}' ({lang}-{country}): {e}")
                     continue
-                seen_links.add(item["link"])
-                all_news.append(item)
-                if len(all_news) >= max_checked:
-                    break
 
-    return all_news[:max_checked]
+        # فرز أخبار هذه المجموعة زمنياً (الأحدث أولاً) قبل إضافتها للقائمة الرئيسية
+        group_items.sort(key=lambda x: x["published_dt"], reverse=True)
+        all_news.extend(group_items)
+
+        # التوقف إذا وصلنا للسقف المطلوب مع الحفاظ على المقالات الأكثر أولوية
+        if len(all_news) >= max_checked:
+            break
+
+    # تنظيف حقل تاريخ المقارنة المؤقت قبل إرجاع البيانات
+    final_results = all_news[:max_checked]
+    for news in final_results:
+        news.pop("published_dt", None)
+
+    return final_results
