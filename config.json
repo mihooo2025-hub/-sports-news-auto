@@ -19,14 +19,21 @@
     "language": "ar",
     "country": "EG"
   },
-  "global_sources": {
-    "enabled": true,
-    "locales": [
-      { "language": "es", "country": "ES" },
-      { "language": "en", "country": "GB" },
-      { "language": "en", "country": "US" }
-    ]
-  },
+  "rss_sources": [
+    { "name": "Marca (ES)", "url": "https://e00-marca.uecdn.es/rss/futbol/liga-bbva.xml" },
+    { "name": "AS (ES)", "url": "https://as.com/rss/futbol/primera.xml" },
+    { "name": "Mundo Deportivo (ES)", "url": "https://www.mundodeportivo.com/rss/futbol.xml" },
+    { "name": "Sport (ES)", "url": "https://www.sport.es/rss/futbol/rss.xml" },
+    { "name": "Sky Sports (EN)", "url": "https://www.skysports.com/rss/12040" },
+    { "name": "BBC Sport (EN)", "url": "http://feeds.bbci.co.uk/sport/football/rss.xml" },
+    { "name": "The Guardian (EN)", "url": "https://www.theguardian.com/football/rss" },
+    { "name": "Yallakora (AR)", "url": "https://www.yallakora.com/rss/rssnews" },
+    { "name": "Kooora (AR)", "url": "https://www.kooora.com/?rss=1" },
+    { "name": "FilGoal (AR)", "url": "https://www.filgoal.com/rss/news" },
+    { "name": "Gazzetta dello Sport (IT)", "url": "https://www.gazzetta.it/rss/Calcio.xml" },
+    { "name": "Foot Mercato (FR)", "url": "https://www.footmercato.net/flux-rss" },
+    { "name": "Kicker (DE)", "url": "https://newsfeed.kicker.de/news/aktuell" }
+  ],
   "blocked_domains": [
     "hihi2.com",
     "alwasat.ly",
@@ -35,54 +42,6 @@
     "facebook.com",
     "m.facebook.com",
     "t.co"
-  ],
-  "priority_keywords": [
-    "Real Madrid",
-    "FC Barcelona",
-    "Liverpool FC",
-    "Manchester United",
-    "Manchester City",
-    "Chelsea FC",
-    "Arsenal FC",
-    "Bayern Munich",
-    "Paris Saint-Germain",
-    "AC Milan",
-    "Juventus",
-    "Inter Milan",
-    "Borussia Dortmund",
-    "Atletico Madrid",
-    "ريال مدريد",
-    "برشلونة",
-    "ليفربول",
-    "مانشستر يونايتد",
-    "مانشستر سيتي",
-    "تشيلسي",
-    "ارسنال",
-    "بايرن ميونخ",
-    "باريس سان جيرمان",
-    "ميلان",
-    "يوفنتوس",
-    "انتر ميلان",
-    "بروسيا دورتموند",
-    "اتلتيكو مدريد"
-  ],
-  "league_keywords": [
-    "La Liga",
-    "Premier League",
-    "Serie A",
-    "Bundesliga",
-    "Ligue 1",
-    "الدوري الاسباني",
-    "الدوري الانجليزي الممتاز",
-    "الدوري الايطالي",
-    "الدوري الالماني",
-    "الدوري الفرنسي"
-  ],
-  "general_keywords": [
-    "Transfer news",
-    "Fichajes",
-    "سوق الانتقالات كرة القدم",
-    "اخبار كرة القدم"
   ],
   "categories": [
     "مقالات وتحليلات",
