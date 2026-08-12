@@ -29,7 +29,12 @@
   },
   "blocked_domains": [
     "hihi2.com",
-    "alwasat.ly"
+    "alwasat.ly",
+    "twitter.com",
+    "x.com",
+    "facebook.com",
+    "m.facebook.com",
+    "t.co"
   ],
   "priority_keywords": [
     "Real Madrid",
