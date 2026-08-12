@@ -2,7 +2,7 @@
 db.py
 =====
 قاعدة بيانات SQLite محلية لتسجيل الأخبار التي تمت معالجتها،
-مع توفير دالة جلب أحدث العناوين للفحص المزدوج لمنع التكرار نهائيًا.
+تعتمد على رابط الخبر لمنع إعادة جلب أي خبر مسبقًا نهائيًا.
 """
 
 import sqlite3
@@ -27,7 +27,6 @@ def init_db():
             created_at TEXT
         )
     """)
-    # إنشاء الفهرس لضمان سرعة البحث في التكرار
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_url_hash ON processed_news(url_hash)
     """)
@@ -40,9 +39,12 @@ def _hash_url(url: str) -> str:
 
 
 def is_processed(url: str) -> bool:
+    """
+    تحقق مما إذا كان رابط الخبر قد تم جلبه أو معالجته مسبقاً.
+    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM processed_news WHERE url_hash = ?", (_hash_url(url),))
+    cur.execute("SELECT 1 FROM processed_news WHERE url_hash = ? OR original_url = ?", (_hash_url(url), url))
     result = cur.fetchone()
     conn.close()
     return result is not None
@@ -50,7 +52,7 @@ def is_processed(url: str) -> bool:
 
 def get_recent_titles(limit: int = 40) -> list[str]:
     """
-    يجلب أحدث العناوين المنشورة من قاعدة البيانات لمقارنتها نصياً ودلالياً.
+    يجلب أحدث العناوين المنشورة من قاعدة البيانات.
     """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -64,6 +66,9 @@ def get_recent_titles(limit: int = 40) -> list[str]:
 
 
 def mark_processed(url: str, title: str = "", wp_post_id: int = None, status: str = "published"):
+    """
+    يحفظ رابط الخبر المجلوب في قاعدة البيانات حتى لا يرجع له السكريبت مرة أخرى.
+    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     try:
