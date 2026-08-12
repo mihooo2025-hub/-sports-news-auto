@@ -2,15 +2,16 @@
 rss_fetcher.py
 ==============
 يجلب الأخبار مباشرة من روابط RSS الخاصة بأقوى المواقع الرياضية العالمية والعربية:
-- القراءة المباشرة لمصادر محددة وموثوقة.
+- القراءة المباشرة لمصادر محددة وموثوقة مع استخدام User-Agent لتفادي الحظر.
 - تصفية واستبعاد الألعاب الرياضية الأخرى تلقائيًا.
-- فلترة زمنية: الأخبار المنشورة خلال آخر 6 ساعات فقط.
+- فلترة زمنية: الأخبار المنشورة خلال آخر 6 ساعات فقط (أو التجاوز المرن إذا لم يتوفر التاريخ).
 - منع التكرار القاطع عبر التحقق المباشر من روابط الأخبار المجلوبة سابقًا في db.
 - ترتيب الأخبار من الأحدث إلى الأقدم.
 """
 
-import feedparser
+import urllib.request
 from datetime import datetime, timezone, timedelta
+import feedparser
 from config import CONFIG
 import db
 
@@ -30,14 +31,31 @@ EXCLUDED_SPORTS_KEYWORDS = [
 def _is_recent(entry, max_age_hours: int) -> bool:
     published = entry.get("published_parsed") or entry.get("updated_parsed")
     if not published:
+        return True  # إذا لم يتوفر التاريخ، نمرره للفحص بدلاً من استبعاده
+    try:
+        published_dt = datetime(*published[:6], tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - published_dt
+        return age <= timedelta(hours=max_age_hours)
+    except Exception:
         return True
-    published_dt = datetime(*published[:6], tzinfo=timezone.utc)
-    age = datetime.now(timezone.utc) - published_dt
-    return age <= timedelta(hours=max_age_hours)
 
 
 def _is_football_only(title: str) -> bool:
     return not any(bad_word.lower() in title.lower() for bad_word in EXCLUDED_SPORTS_KEYWORDS)
+
+
+def _fetch_feed_content(url: str):
+    """
+    جلب محتوى الخلاصة باستخدام User-Agent لمتصفح حقيقي لتجاوز حظر Cloudflare/Kooora/Goal
+    """
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:
+        return response.read()
 
 
 def fetch_prioritized_news() -> list:
@@ -57,15 +75,18 @@ def fetch_prioritized_news() -> list:
             continue
 
         try:
-            feed = feedparser.parse(source_url)
+            # جلب المحتوى بالهيدر المتوافق ثم تمريره لـ feedparser
+            raw_data = _fetch_feed_content(source_url)
+            feed = feedparser.parse(raw_data)
+
             for entry in feed.entries:
-                title = entry.get("title", "")
-                link = entry.get("link", "")
+                title = entry.get("title", "").strip()
+                link = entry.get("link", "").strip()
 
                 if not title or not link or link in seen_links:
                     continue
 
-                # الاعتماد القاطع على قاعدة البيانات: منع الخبر فورًا إن تم جلبه سابقًا
+                # منع التكرار: التثبت من قاعدة البيانات
                 if db.is_processed(link):
                     continue
 
