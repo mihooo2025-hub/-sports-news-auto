@@ -4,7 +4,7 @@ rss_fetcher.py
 يجلب الأخبار مباشرة من روابط RSS الخاصة بأقوى المواقع الرياضية العالمية والعربية:
 - القراءة المباشرة لمصادر محددة وموثوقة.
 - تصفية واستبعاد الألعاب الرياضية الأخرى تلقائيًا.
-- فلترة زمنية: الأخبار المنشورة خلال آخر 12 ساعة فقط.
+- فلترة زمنية: الأخبار المنشورة خلال آخر 6 ساعات فقط.
 - ترتيب الأخبار من الأحدث إلى الأقدم.
 """
 
@@ -40,7 +40,7 @@ def _is_football_only(title: str) -> bool:
 
 def fetch_prioritized_news() -> list:
     settings = CONFIG["fetch_settings"]
-    max_age = settings.get("max_article_age_hours", 12)
+    max_age = settings.get("max_article_age_hours", 6)
     max_checked = settings.get("max_articles_checked_per_cycle", 200)
     sources = CONFIG.get("rss_sources", [])
 
