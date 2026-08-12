@@ -2,7 +2,7 @@
 db.py
 =====
 قاعدة بيانات SQLite محلية لتسجيل الأخبار التي تمت معالجتها،
-مع توفير دالة جلب أحدث العناوين للفحص المزدوج.
+مع توفير دالة جلب أحدث العناوين للفحص المزدوج لمنع التكرار نهائيًا.
 """
 
 import sqlite3
@@ -27,6 +27,10 @@ def init_db():
             created_at TEXT
         )
     """)
+    # إنشاء الفهرس لضمان سرعة البحث في التكرار
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_url_hash ON processed_news(url_hash)
+    """)
     conn.commit()
     conn.close()
 
@@ -46,7 +50,7 @@ def is_processed(url: str) -> bool:
 
 def get_recent_titles(limit: int = 40) -> list[str]:
     """
-    يجلب أحدث 40 عنواناً منشوراً من قاعدة البيانات لمقارنتها نصياً ودلالياً.
+    يجلب أحدث العناوين المنشورة من قاعدة البيانات لمقارنتها نصياً ودلالياً.
     """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
