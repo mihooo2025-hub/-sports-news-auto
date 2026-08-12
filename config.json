@@ -20,8 +20,8 @@
     "country": "EG"
   },
   "rss_sources": [
-    { "name": "Goal Arabic", "url": "https://www.goal.com/feeds/ar/news" },
-    { "name": "Kooora (AR)", "url": "https://www.kooora.com/default.aspx?rss=1" }
+    { "name": "Goal Arabic", "url": "https://www.goal.com/ar/rss.xml" },
+    { "name": "Kooora (AR)", "url": "https://www.kooora.com/?rss=1" }
   ],
   "blocked_domains": [
     "hihi2.com",
