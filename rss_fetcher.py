@@ -1,180 +1,170 @@
 """
-rss_fetcher.py
-==============
-يجلب أخبار كرة القدم من Google News RSS بلغتين أو أكثر (المصادر العالمية
-أولاً للسبق الإخباري + المصادر العربية كداعم، حسب locales المحددة في config.json)، حسب:
-- كلمات مفتاحية بالأولوية (ريال مدريد وبرشلونة أولًا، ثم الدوريات الكبرى، ثم العام)
-- فرز أحدث الأخبار زمنياً أولاً لكل مستوى أولوية
-- فلترة زمنية: آخر 12 ساعة فقط
-- استبعاد صارم لأي رياضة غير كرة القدم (بعدة لغات)
-- سقف أقصى لعدد الأخبار المفحوصة في كل دورة (افتراضيًا 100)
+content_ai.py
+=============
+يرسل نص الخبر الأصلي (بأي لغة) إلى OpenAI ليقوم بـ:
+1. الفحص النصي الأولي بواسطة بايثون + المراجعة الذكية عبر OpenAI للتأكد من المعنى.
+2. ترجمته للعربية أولًا وإعادة صياغته بأسلوب صحفي رياضي محترف.
+3. اقتراح عنوان جذاب واختيار التصنيف المناسب.
 """
 
-import feedparser
-from datetime import datetime, timezone, timedelta
-from urllib.parse import quote
-
+import json
+import re
+from difflib import SequenceMatcher
+from openai import OpenAI
 from config import CONFIG
 
-# كلمات تستبعد الخبر فورًا إذا وُجدت في العنوان (رياضات أخرى، بعدة لغات)
-EXCLUDED_SPORTS_KEYWORDS = [
-    # عربي
-    "كرة السلة", "السلة", "بطولة السلة", "NBA", "دوري السلة",
-    "التنس", "ويمبلدون", "رولان جاروس", "بطولة التنس",
-    "فورمولا 1", "فورمولا1", "الفورمولا", "F1",
-    "الكريكيت", "الرغبي", "الجولف", "الملاكمة",
-    "السباحة", "ألعاب القوى", "الجمباز",
-    # إنجليزي/إسباني/عام
-    "Basketball", "Baloncesto", "Tennis", "Tenis",
-    "Formula 1", "Fórmula 1", "Cricket", "Rugby", "Golf",
-    "Boxing", "Boxeo", "Swimming", "Natación",
-    "Baseball", "Béisbol", "NFL", "NHL", "MLB",
-]
+client = OpenAI(api_key=CONFIG["openai"]["api_key"])
+MODEL = CONFIG["openai"].get("model", "gpt-4o-mini")
 
-# مؤهل "كرة القدم" حسب لغة البحث، يُستخدم فقط للكلمات العامة/الدوريات
-FOOTBALL_QUALIFIER_BY_LANGUAGE = {
-    "ar": "كرة القدم",
-    "en": "football",
-    "es": "fútbol",
-    "it": "calcio",
-    "de": "Fußball",
-    "fr": "football",
-}
+BLOCKED_CATEGORIES = {"اهم الاخبار", "مقالات وتحليلات"}
+ALLOWED_CATEGORIES = [c for c in CONFIG["categories"] if c not in BLOCKED_CATEGORIES]
+
+SYSTEM_PROMPT = f"""أنت محرر رياضي محترف متخصص في أخبار كرة القدم لموقع عربي إخباري.
+يجب عليك الالتزام الصارم بالقواعد التالية دون استثناء:
+
+قواعد اللغة والترجمة:
+- إذا كان نص الخبر المُرسل إليك بلغة غير عربية (إنجليزية، إسبانية، إيطالية، أو أي لغة أخرى)،
+  ترجمه أولًا ترجمة دقيقة وأمينة للمعنى، ثم أعد صياغته بالعربية وفق القواعد أدناه.
+- الناتج النهائي يجب أن يكون بالعربية الفصحى الصحفية دائمًا، بغض النظر عن لغة المصدر، ويجب تجنب الاخطاء الإملائية وايضا كتابة اسماء اللاعبين و المدربيين باللغة العربية بشكل صحيح.
+
+قواعد الصياغة:
+- اعتمد فقط على المعلومات الموجودة حرفيًا في النص المُرسل إليك (بعد ترجمته إن لزم). ممنوع منعًا باتًا استخدام معلومات من ذاكرتك العامة أو التخمين أو افتراض أي تفاصيل غير مذكورة.
+- إذا كان النص المُرسل ناقصًا أو غامضًا بخصوص اسم لاعب أو مدرب أو ناديه الحالي، لا تفترض المعلومة؛ اكتب الجملة بصياغة عامة أو احذفها.
+- أعد صياغة الخبر بأسلوب صحفي رياضي احترافي، مختصر وسريع ، بدون حشو أو تكرار، يركز على لب الموضوع.
+- يفضل أن تكون عدد كلمات الخبر بما يقارب 120 كلمة وإذا كان الخبر قصيراً لا تختصره أكثر بل أعد صياغته فقط.
+- اكتب بالعربية الفصحى الصحفية الكاملة دائمًا، وأسماء اللاعبين والأندية بالعربية (استخدم الأسماء العربية الشائعة والمعروفة للأندية، مثل "ريال مدريد" وليس "Real Madrid").
+- عند الانتقال بين التفاصيل يجب الانتقال بسلاسة بوضع كلمات مناسبة مثل (و، وكما ذكرت ، وايضا وغيرها من الكلمات ).
+- يفضل عدم ذكر أسماء الصحف والمواقع في تفاصيل الخبر.
+
+قواعد العنوان:
+- اقترح عنوانًا واحدًا فقط، من 3 إلى 7 كلمات أو أكثر قليلاً.
+- يجذب الانتباة وسريع، يخدم عنصر التشويق والفضول والغموض ، او قد ياتي بصيغة سؤال ، يلمّح للحدث دون كشف كل التفاصيل.
+- استخدم أفعالًا قوية عند الحاجة مثل: يقترب، يحسم، يضغط، يفاجئ، يترقب، يشعل، يهدد، يكشف، ينعش، يفتح الباب.
+- ممنوع ذكر اسم الصحفي أو اسم الموقع المصدر في العنوان.
+
+قواعد التصنيف:
+- اختر تصنيفًا واحدًا أو أكثر (بحد أقصى 3) حصريًا من هذه القائمة فقط، دون إضافة أي تصنيف من خارجها بأي شكل:
+{json.dumps(ALLOWED_CATEGORIES, ensure_ascii=False)}
+- التزم دائمًا باختيار تصنيف النادي الذي يخص الخبر مباشرة إذا كان اسمه مذكورًا في القائمة أعلاه.
+- إذا كان الخبر يخص ناديين مختلفين معًا بشكل مباشر (مثل مباراة بين ناديين، أو صفقة انتقال بين ناديين)، اختر تصنيف كل ناد من الناديين معًا في نفس الوقت.
+- إذا كان الخبر عن انتقال لاعب أو صفقة، أضف "سوق الانتقالات" إلى جانب تصنيف/تصنيفات الأندية المعنية.
+- إذا لم ينتمِ الخبر لأي نادٍ من القائمة، اختر التصنيف الأقرب موضوعيًا من الدوريات أو الأندية المذكورة فيه. لا تترك القائمة فارغة إلا إذا تعذّر تمامًا إيجاد أي تصنيف مناسب.
+- ممنوع منعًا باتًا اقتراح أي اسم تصنيف غير موجود حرفيًا في القائمة أعلاه، حتى لو كان قريب الشبه أو بديلاً منطقيًا.
+
+أعد ردك **بصيغة JSON فقط** دون أي نص إضافي أو علامات Markdown، بالمخطط التالي بالضبط:
+{{
+  "rewritten_content": "نص الخبر المُعاد صياغته بالعربية (HTML بسيط بفقرات <p>)",
+  "title": "العنوان المقترح بالعربية",
+  "categories": ["تصنيف 1", "تصنيف 2"]
+}}
+"""
 
 
-def _build_gnews_url(query: str, language: str, country: str, add_football_qualifier: bool = False) -> str:
-    qualifier = FOOTBALL_QUALIFIER_BY_LANGUAGE.get(language, "football")
-    final_query = query
-    if add_football_qualifier and qualifier not in query:
-        final_query = f"{query} {qualifier}"
+def is_semantic_duplicate(new_title: str, recent_titles: list[str]) -> bool:
+    """
+    يفحص التكرار مع مراعاة عدم استبعاد الأخبار التي تحمل تفاصيل أو تطورات جديدة.
+    """
+    if not recent_titles or not new_title:
+        return False
 
-    encoded_query = quote(final_query)
-    return (
-        f"https://news.google.com/rss/search?q={encoded_query}"
-        f"&hl={language}&gl={country}&ceid={country}:{language}"
+    new_title_clean = new_title.strip()
+    
+    # استخراج الكلمات الأساسية (تجاوز الكلمات القصيرة وأدوات الربط)
+    new_words = set(re.findall(r'\w{3,}', new_title_clean.lower()))
+    
+    suspicious_titles = []
+
+    for old_title in recent_titles:
+        old_title_clean = old_title.strip()
+        
+        # 1. مطابقة نصية شبه متطابقة حرفياً (90% فأكثر)
+        ratio = SequenceMatcher(None, new_title_clean, old_title_clean).ratio()
+        if ratio >= 0.90:
+            print(f"⚠️ تكرار نصي مؤكد بنسبة {int(ratio*100)}%: {new_title_clean}")
+            return True
+
+        # 2. فحص تقاطع الكلمات الأساسية
+        old_words = set(re.findall(r'\w{3,}', old_title_clean.lower()))
+        common_words = new_words.intersection(old_words)
+        
+        # تحويل للذكاء الاصطناعي فقط إذا كان هناك تقاطع عالي في الكلمات (3 كلمات رئيسية أو نسبة تشابه >= 40%)
+        if len(common_words) >= 3 or ratio >= 0.40:
+            suspicious_titles.append(old_title_clean)
+
+    # إذا لم يستوفِ شروط الاشتباه، يعتبر خبراً جديداً فوراً
+    if not suspicious_titles:
+        return False
+
+    suspicious_titles = suspicious_titles[:8]
+
+    prompt = f"""أنت محرر رياضي خبير وميزانك دقيق جداً. مهمتك هي التمييز بين "الخبر المكرر بنفس التفاصيل" و "الخبر الجديد أو التطور البرمجي/التصريحي".
+
+العنوان الجديد المراد فحصه:
+"{new_title_clean}"
+
+العناوين المنشورة سابقاً:
+{json.dumps(suspicious_titles, ensure_ascii=False)}
+
+قواعد التقييم:
+1. يعتبر [مكرر - duplicate: true] فقط إذا كان العنوان الجديد يعيد صياغة نفس الواقعة أو نفس الحدث دون إدخال أي زاوية أو معلومة جديدة.
+   - مثال للمكرر: "رودري يرفض ريال مدريد" مقارنة بـ "3 أسباب تجعل رودري يرفض مدريد".
+
+2. يعتبر [غير مكرر - duplicate: false] إذا كان الخبر يحتوي على تحديث، تصريح مختلف، رد فعل جديد، أرقام جديدة، أو واقعة أخرى لنفس اللاعب/النادي.
+   - مثال لغير المكرر: "رودري يرفض مدريد" مقارنة بـ "موقف ريال مدريد بعد رفض رودري" أو "رودري يوضح سبب رفضه لمدريد".
+
+أجب بصيغة JSON فقط بالتنسيق التالي:
+{{"duplicate": true}} أو {{"duplicate": false}}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        res = json.loads(response.choices[0].message.content)
+        is_dup = res.get("duplicate", False)
+        if is_dup:
+            print(f"⚠️ تم حجب الخبر لأنه مكرر تماماً: {new_title_clean}")
+        return is_dup
+    except Exception as e:
+        print(f"⚠️ خطأ في فحص الذكاء الاصطناعي: {e}")
+        return False
+
+
+def process_article(raw_text: str, source_title: str, matched_keyword: str) -> dict | None:
+    if not raw_text or len(raw_text) < 100:
+        print("⚠️ تم تجاوز المقال — النص الأصلي قصير جدًا أو فارغ (لا يمكن الاعتماد عليه).")
+        return None
+
+    user_prompt = (
+        f"عنوان الخبر كما ورد من المصدر: {source_title}\n"
+        f"الكلمة المفتاحية المرتبطة بالبحث: {matched_keyword}\n\n"
+        f"نص الخبر الأصلي الكامل (قد يكون بلغة غير عربية):\n{raw_text}"
     )
 
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"❌ فشل استدعاء OpenAI أو تحليل الرد: {e}")
+        return None
 
-def _is_recent(entry, max_age_hours: int) -> bool:
-    published = entry.get("published_parsed")
-    if not published:
-        return False
-    published_dt = datetime(*published[:6], tzinfo=timezone.utc)
-    age = datetime.now(timezone.utc) - published_dt
-    return age <= timedelta(hours=max_age_hours)
+    result["categories"] = [c for c in result.get("categories", []) if c in ALLOWED_CATEGORIES]
+    if not result["categories"]:
+        print("⚠️ لم يتم تحديد تصنيف مناسب للخبر — سيُنشر بلا تصنيف (غير مصنف).")
 
+    if not result.get("title"):
+        print("⚠️ لم يتم توليد عنوان — سيتم تجاوز المقال.")
+        return None
 
-def _is_football_only(title: str) -> bool:
-    return not any(bad_word.lower() in title.lower() for bad_word in EXCLUDED_SPORTS_KEYWORDS)
-
-
-def fetch_news_for_keyword(
-    keyword: str, max_age_hours: int, language: str, country: str, add_football_qualifier: bool = False
-) -> list:
-    url = _build_gnews_url(keyword, language, country, add_football_qualifier)
-    feed = feedparser.parse(url)
-
-    results = []
-    for entry in feed.entries:
-        title = entry.get("title", "")
-        link = entry.get("link", "")
-        if not title or not link:
-            continue
-        if not _is_football_only(title):
-            continue
-        if not _is_recent(entry, max_age_hours):
-            continue
-
-        published_parsed = entry.get("published_parsed")
-        published_dt = datetime(*published_parsed[:6], tzinfo=timezone.utc) if published_parsed else datetime.min.replace(tzinfo=timezone.utc)
-
-        results.append({
-            "title": title,
-            "link": link,
-            "published": entry.get("published", ""),
-            "published_dt": published_dt,  # أضيف لاستخدامه في الفرز الزمني
-            "source": entry.get("source", {}).get("title", "") if entry.get("source") else "",
-            "matched_keyword": keyword,
-            "search_language": language,
-        })
-    return results
-
-
-def _build_locales_list() -> list:
-    """
-    يبني قائمة اللغات/الدول للبحث: المصادر العالمية أولاً للحصول على السبق الإخباري،
-    ثم المصادر العربية كداعم إن وُجدت.
-    """
-    settings = CONFIG["fetch_settings"]
-    arabic_locale = {"language": settings["language"], "country": settings["country"]}
-
-    locales = []
-    global_cfg = CONFIG.get("global_sources", {})
-
-    # تقديم المصادر العالمية في البداية أولاً
-    if global_cfg.get("enabled"):
-        locales.extend(global_cfg.get("locales", []))
-
-    # إضافة المصادر العربية ثانياً
-    locales.append(arabic_locale)
-
-    return locales
-
-
-def fetch_prioritized_news() -> list:
-    """
-    يجلب الأخبار بالترتيب الصارم للأولويات:
-    1. أولوية الكلمات المفتاحية (الأندية أولاً ثم الدوريات ثم العام).
-    2. فرز المقالات داخل كل مستوى لترتيب الأحدث زمنياً أولاً (Recency).
-    3. أولوية المصادر (المصادر العالمية أولاً ثم المصادر العربية).
-    """
-    settings = CONFIG["fetch_settings"]
-    max_age = settings["max_article_age_hours"]
-    max_checked = settings.get("max_articles_checked_per_cycle", 100)
-
-    keyword_groups = [
-        # المجموعة الأولى: الأندية والكلمات عالية الأولوية
-        ([(kw, False) for kw in CONFIG["priority_keywords"]]),
-        # المجموعة الثانية: الدوريات والبطولات
-        ([(kw, True) for kw in CONFIG["league_keywords"]]),
-        # المجموعة الثالثة: الكلمات العامة
-        ([(kw, True) for kw in CONFIG["general_keywords"]]),
-    ]
-
-    locales = _build_locales_list()
-    all_news = []
-    seen_links = set()
-
-    # المرور على مجموعات الكلمات المفتاحية حسب الترتيب العالي
-    for group in keyword_groups:
-        group_items = []
-
-        for locale in locales:
-            lang = locale["language"]
-            country = locale["country"]
-
-            for keyword, add_qualifier in group:
-                try:
-                    items = fetch_news_for_keyword(keyword, max_age, lang, country, add_qualifier)
-                    for item in items:
-                        if item["link"] not in seen_links:
-                            seen_links.add(item["link"])
-                            group_items.append(item)
-                except Exception as e:
-                    print(f"⚠️ فشل جلب أخبار الكلمة '{keyword}' ({lang}-{country}): {e}")
-                    continue
-
-        # فرز أخبار هذه المجموعة زمنياً (الأحدث أولاً) قبل إضافتها للقائمة الرئيسية
-        group_items.sort(key=lambda x: x["published_dt"], reverse=True)
-        all_news.extend(group_items)
-
-        # التوقف إذا وصلنا للسقف المطلوب مع الحفاظ على المقالات الأكثر أولوية
-        if len(all_news) >= max_checked:
-            break
-
-    # تنظيف حقل تاريخ المقارنة المؤقت قبل إرجاع البيانات
-    final_results = all_news[:max_checked]
-    for news in final_results:
-        news.pop("published_dt", None)
-
-    return final_results
+    return result
