@@ -5,12 +5,14 @@ rss_fetcher.py
 - القراءة المباشرة لمصادر محددة وموثوقة.
 - تصفية واستبعاد الألعاب الرياضية الأخرى تلقائيًا.
 - فلترة زمنية: الأخبار المنشورة خلال آخر 6 ساعات فقط.
+- منع التكرار القاطع عبر التحقق المباشر من روابط الأخبار المجلوبة سابقًا في db.
 - ترتيب الأخبار من الأحدث إلى الأقدم.
 """
 
 import feedparser
 from datetime import datetime, timezone, timedelta
 from config import CONFIG
+import db
 
 EXCLUDED_SPORTS_KEYWORDS = [
     "كرة السلة", "السلة", "بطولة السلة", "NBA", "دوري السلة",
@@ -61,6 +63,10 @@ def fetch_prioritized_news() -> list:
                 link = entry.get("link", "")
 
                 if not title or not link or link in seen_links:
+                    continue
+
+                # الاعتماد القاطع على قاعدة البيانات: منع الخبر فورًا إن تم جلبه سابقًا
+                if db.is_processed(link):
                     continue
 
                 if not _is_football_only(title):
