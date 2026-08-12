@@ -1,8 +1,8 @@
 """
 rss_fetcher.py
 ==============
-يجلب أخبار كرة القدم من Google News RSS بلغتين أو أكثر (عربية دائمًا + مصادر
-عالمية اختيارية مثل Marca وSport وESPN حسب locales المحددة في config.json)، حسب:
+يجلب أخبار كرة القدم من Google News RSS بلغتين أو أكثر (المصادر العالمية
+أولاً للسبق الإخباري + المصادر العربية كداعم، حسب locales المحددة في config.json)، حسب:
 - كلمات مفتاحية بالأولوية (ريال مدريد وبرشلونة أولًا، ثم الدوريات الكبرى، ثم العام)
 - فرز أحدث الأخبار زمنياً أولاً لكل مستوى أولوية
 - فلترة زمنية: آخر 12 ساعة فقط
@@ -102,15 +102,21 @@ def fetch_news_for_keyword(
 
 def _build_locales_list() -> list:
     """
-    يبني قائمة اللغات/الدول للبحث: العربية دائمًا أولًا، ثم المصادر العالمية
-    إن كانت مفعّلة في الإعدادات.
+    يبني قائمة اللغات/الدول للبحث: المصادر العالمية أولاً للحصول على السبق الإخباري،
+    ثم المصادر العربية كداعم إن وُجدت.
     """
     settings = CONFIG["fetch_settings"]
-    locales = [{"language": settings["language"], "country": settings["country"]}]
+    arabic_locale = {"language": settings["language"], "country": settings["country"]}
 
+    locales = []
     global_cfg = CONFIG.get("global_sources", {})
+
+    # تقديم المصادر العالمية في البداية أولاً
     if global_cfg.get("enabled"):
         locales.extend(global_cfg.get("locales", []))
+
+    # إضافة المصادر العربية ثانياً
+    locales.append(arabic_locale)
 
     return locales
 
@@ -120,7 +126,7 @@ def fetch_prioritized_news() -> list:
     يجلب الأخبار بالترتيب الصارم للأولويات:
     1. أولوية الكلمات المفتاحية (الأندية أولاً ثم الدوريات ثم العام).
     2. فرز المقالات داخل كل مستوى لترتيب الأحدث زمنياً أولاً (Recency).
-    3. أولوية المصادر (العربية أولاً ثم المصادر العالمية).
+    3. أولوية المصادر (المصادر العالمية أولاً ثم المصادر العربية).
     """
     settings = CONFIG["fetch_settings"]
     max_age = settings["max_article_age_hours"]
