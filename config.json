@@ -13,26 +13,15 @@
     "chat_id": "PASTE_YOUR_TELEGRAM_GROUP_CHAT_ID_HERE"
   },
   "fetch_settings": {
-    "max_article_age_hours": 12,
+    "max_article_age_hours": 6,
     "max_articles_checked_per_cycle": 200,
     "max_articles_published_per_cycle": 40,
     "language": "ar",
     "country": "EG"
   },
   "rss_sources": [
-    { "name": "Marca (ES)", "url": "https://e00-marca.uecdn.es/rss/futbol/liga-bbva.xml" },
-    { "name": "AS (ES)", "url": "https://as.com/rss/futbol/primera.xml" },
-    { "name": "Mundo Deportivo (ES)", "url": "https://www.mundodeportivo.com/rss/futbol.xml" },
-    { "name": "Sport (ES)", "url": "https://www.sport.es/rss/futbol/rss.xml" },
-    { "name": "Sky Sports (EN)", "url": "https://www.skysports.com/rss/12040" },
-    { "name": "BBC Sport (EN)", "url": "http://feeds.bbci.co.uk/sport/football/rss.xml" },
-    { "name": "The Guardian (EN)", "url": "https://www.theguardian.com/football/rss" },
-    { "name": "Yallakora (AR)", "url": "https://www.yallakora.com/rss/rssnews" },
     { "name": "Kooora (AR)", "url": "https://www.kooora.com/?rss=1" },
-    { "name": "FilGoal (AR)", "url": "https://www.filgoal.com/rss/news" },
-    { "name": "Gazzetta dello Sport (IT)", "url": "https://www.gazzetta.it/rss/Calcio.xml" },
-    { "name": "Foot Mercato (FR)", "url": "https://www.footmercato.net/flux-rss" },
-    { "name": "Kicker (DE)", "url": "https://newsfeed.kicker.de/news/aktuell" }
+    { "name": "Goal Arabic", "url": "https://www.goal.com/feeds/ar/news" }
   ],
   "blocked_domains": [
     "hihi2.com",
