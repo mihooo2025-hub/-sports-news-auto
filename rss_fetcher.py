@@ -1,14 +1,15 @@
 """
 rss_fetcher.py
 ==============
-يجلب الأخبار مباشرة من روابط RSS الخاصة بـ Kooora و Goal Arabic:
-- معالجة خطأ HTTP 404 و 403 عبر هيدرات متصفح حقيقية.
+يجلب الأخبار مباشرة من Kooora و Goal Arabic:
+- يدعم قراءة RSS والكشط المباشر في حال عدم توفر الخلاصة (تجاوز 404/403).
 - فلترة زمنية لآخر 6 ساعات.
-- جلب 10 أخبار كحد أقصى.
-- منع التكرار بناءً على سجل db المباشر.
+- جلب 10 أخبار كحد أقصى في الدورة.
+- منع التكرار القاطع بناءً على قاعدة البيانات.
 """
 
 import urllib.request
+import re
 from datetime import datetime, timezone, timedelta
 import feedparser
 from config import CONFIG
@@ -43,15 +44,34 @@ def _is_football_only(title: str) -> bool:
     return not any(bad_word.lower() in title.lower() for bad_word in EXCLUDED_SPORTS_KEYWORDS)
 
 
-def _fetch_feed_content(url: str):
+def _fetch_url_content(url: str) -> bytes:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "ar,en-US;q=0.7,en;q=0.3"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=15) as response:
         return response.read()
+
+
+def _scrape_kooora_fallback() -> list:
+    """جلب مباشر لأحدث أخبار كووورة من الصفحة الرئيسية عند غياب تغذية RSS"""
+    news_items = []
+    try:
+        html = _fetch_url_content("https://www.kooora.com/").decode("utf-8", errors="ignore")
+        # استخراج روابط الأخبار والعناوين عبر Regex
+        matches = re.findall(r'<a\s+href=["\'](\?n=\d+[^"\']*)["\'][^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL)
+        for href, title_text in matches:
+            clean_title = re.sub(r'<[^>]+>', '', title_text).strip()
+            full_link = f"https://www.kooora.com/{href}" if not href.startswith("http") else href
+            if clean_title and len(clean_title) > 10:
+                news_items.append({
+                    "title": clean_title,
+                    "link": full_link,
+                    "published_parsed": None
+                })
+    except Exception as e:
+        print(f"⚠️ فشل الكشط المباشر لموقع كووورة: {e}")
+    return news_items
 
 
 def fetch_prioritized_news() -> list:
@@ -70,45 +90,48 @@ def fetch_prioritized_news() -> list:
         if not source_url:
             continue
 
+        entries = []
         try:
-            raw_data = _fetch_feed_content(source_url)
+            raw_data = _fetch_url_content(source_url)
             feed = feedparser.parse(raw_data)
+            entries = feed.entries
+        except Exception:
+            # إذا فشل RSS لموقع كووورة نلجأ للكشط المباشر
+            if "kooora" in source_url.lower() or "kooora" in source_name.lower():
+                entries = _scrape_kooora_fallback()
 
-            for entry in feed.entries:
-                title = entry.get("title", "").strip()
-                link = entry.get("link", "").strip()
+        for entry in entries:
+            title = entry.get("title", "").strip()
+            link = entry.get("link", "").strip()
 
-                if not title or not link or link in seen_links:
-                    continue
+            if not title or not link or link in seen_links:
+                continue
 
-                if db.is_processed(link):
-                    continue
+            if db.is_processed(link):
+                continue
 
-                if not _is_football_only(title):
-                    continue
+            if not _is_football_only(title):
+                continue
 
-                if not _is_recent(entry, max_age):
-                    continue
+            if not _is_recent(entry, max_age):
+                continue
 
-                published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-                published_dt = (
-                    datetime(*published_parsed[:6], tzinfo=timezone.utc)
-                    if published_parsed
-                    else datetime.now(timezone.utc)
-                )
+            published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+            published_dt = (
+                datetime(*published_parsed[:6], tzinfo=timezone.utc)
+                if published_parsed
+                else datetime.now(timezone.utc)
+            )
 
-                seen_links.add(link)
-                all_news.append({
-                    "title": title,
-                    "link": link,
-                    "published": entry.get("published", ""),
-                    "published_dt": published_dt,
-                    "source": source_name,
-                    "matched_keyword": source_name,
-                })
-        except Exception as e:
-            print(f"⚠️ فشل جلب الأخبار من المصدر '{source_name}': {e}")
-            continue
+            seen_links.add(link)
+            all_news.append({
+                "title": title,
+                "link": link,
+                "published": entry.get("published", ""),
+                "published_dt": published_dt,
+                "source": source_name,
+                "matched_keyword": source_name,
+            })
 
     all_news.sort(key=lambda x: x["published_dt"], reverse=True)
 
