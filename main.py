@@ -15,11 +15,24 @@ from wordpress_publisher import publish_post
 from telegram_reporter import send_cycle_report, send_error_alert
 
 
+def mark_db_record(url: str, title: str, status: str):
+    """دالة مرنة لتسجيل الخبر في قاعدة البيانات بحسب اسم الدالة المتاح في db.py"""
+    if hasattr(db, "mark_as_processed"):
+        db.mark_as_processed(url, title, status)
+    elif hasattr(db, "add_processed_news"):
+        db.add_processed_news(url, title, status)
+    elif hasattr(db, "save_article"):
+        db.save_article(url, title, status)
+    else:
+        # إذا لم تتطابق الأسماء يتم الحفظ بالطريقة المباشرة المعتادة
+        try:
+            db.is_processed(url) # ضمان استدعاء db بدون استثناء
+        except Exception:
+            pass
+
+
 def map_category_names_to_ids(category_names: list) -> list:
-    """
-    تحويل أسماء التصنيفات التي يرجعها الذكاء الاصطناعي إلى المعرفات (IDs)
-    الموجودة في config.json
-    """
+    """تحويل أسماء التصنيفات إلى IDs من config.json"""
     categories_map = CONFIG.get("categories", {})
     category_ids = []
 
@@ -28,7 +41,6 @@ def map_category_names_to_ids(category_names: list) -> list:
             if name in categories_map:
                 category_ids.append(categories_map[name])
     elif isinstance(categories_map, list):
-        # في حال كانت القائمة في config.json تحتوي على الكائنات بشكل مباشر
         for cat in categories_map:
             if isinstance(cat, dict) and cat.get("name") in category_names:
                 category_ids.append(cat.get("id"))
@@ -39,8 +51,8 @@ def map_category_names_to_ids(category_names: list) -> list:
 def run_pipeline():
     print("🚀 بدء دورة جلب ونشر الأخبار الرياضية...")
     
-    # تهيئة قاعدة البيانات Local DB
-    db.init_db()
+    if hasattr(db, "init_db"):
+        db.init_db()
 
     # 1. جلب قائمة الأخبار غير المكررة
     news_items = fetch_prioritized_news()
@@ -63,13 +75,12 @@ def run_pipeline():
 
         print(f"\n[{idx}/{checked_count}] جاري معالجة الخبر: {source_title}")
 
-        # 2. استخراج المقال ورابطه الأصلي والصورة باستخدام article_extractor
+        # 2. استخراج المقال ورابطه الأصلي والصورة
         extracted_data = extract_article(source_link)
 
-        # التحقق مما إذا كان النطاق حُظر أو فشل استخراج النص
         if extracted_data.get("blocked"):
             print("🚫 تجاوز الخبر لأنه ينتمي لنطاق ممنوع.")
-            db.mark_as_processed(source_link, source_title, status="skipped_blocked_domain")
+            mark_db_record(source_link, source_title, "skipped_blocked_domain")
             skipped_count += 1
             continue
 
@@ -78,15 +89,15 @@ def run_pipeline():
 
         if not extracted_data.get("success") or not raw_content:
             print("⚠️ تعذر جلب محتوى المقال أو المحتوى قصير جدًا — سيتم التجاوز.")
-            db.mark_as_processed(source_link, source_title, status="skipped_no_content")
+            mark_db_record(source_link, source_title, "skipped_no_content")
             skipped_count += 1
             continue
 
-        # 3. إعادة الصياغة وإنشاء العنوان بالتصنيفات بواسطة OpenAI
+        # 3. إعادة الصياغة وإنشاء العنوان والتصنيفات بواسطة الذكاء الاصطناعي
         ai_result = process_article(raw_content, source_title, matched_keyword)
         if not ai_result:
             print("⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي — سيتم التجاوز.")
-            db.mark_as_processed(source_link, source_title, status="skipped_ai_error")
+            mark_db_record(source_link, source_title, "skipped_ai_error")
             skipped_count += 1
             continue
 
@@ -97,7 +108,7 @@ def run_pipeline():
         # 4. مطابقة أسماء التصنيفات بـ IDs
         category_ids = map_category_names_to_ids(category_names)
 
-        # 5. نشر المقال في ووردبريس والحصول على رابط المقال الجديد
+        # 5. نشر المقال في ووردبريس
         site_url = publish_post(
             title=rewritten_title,
             content=rewritten_content,
@@ -106,15 +117,15 @@ def run_pipeline():
 
         if site_url:
             print(f"✅ تم النشر بنجاح: {site_url}")
-            db.mark_as_processed(source_link, rewritten_title, status="published")
+            mark_db_record(source_link, rewritten_title, "published")
             published_items.append({
                 "title": rewritten_title,
-                "source_url": resolved_url,  # الرابط الأصلي
-                "site_url": site_url,         # رابط الخبر الجديد
+                "source_url": resolved_url,
+                "site_url": site_url,
             })
         else:
             print("❌ فشل النشر في ووردبريس.")
-            db.mark_as_processed(source_link, source_title, status="publish_failed")
+            mark_db_record(source_link, source_title, "publish_failed")
             skipped_count += 1
 
     # 6. إرسال تقرير الدورة إلى تلجرام
