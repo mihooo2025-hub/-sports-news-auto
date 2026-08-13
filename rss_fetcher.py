@@ -5,7 +5,7 @@ rss_fetcher.py
 - يتجاوز حظر السيرفرات وCloudflare كليًا.
 - يجلب كل الأخبار المنشورة خلال آخر 6 ساعات دون تحديد حد أقصى للعدد.
 - جلب الأخبار حسب الأحدث زمنياً.
-- منع التكرار القاطع عبر فحص الرابط المباشر في db.
+- منع التكرار القاطع عبر فحص الرابط المباشر وعنوان الخبر في db.
 """
 
 import urllib.request
@@ -68,6 +68,7 @@ def fetch_prioritized_news() -> list:
 
     all_news = []
     seen_links = set()
+    seen_titles = set()
 
     for source in sources:
         source_name = source.get("name", "مصدر رياضي")
@@ -87,7 +88,14 @@ def fetch_prioritized_news() -> list:
                 if not raw_title or not link or link in seen_links:
                     continue
 
-                if db.is_processed(link):
+                # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل معالجتها
+                clean_title = _clean_title(raw_title)
+                normalized_title = clean_title.strip().lower()
+
+                if normalized_title in seen_titles:
+                    continue
+
+                if db.is_processed(link, clean_title):
                     continue
 
                 if not _is_football_only(raw_title):
@@ -95,9 +103,6 @@ def fetch_prioritized_news() -> list:
 
                 if not _is_recent(entry, max_age):
                     continue
-
-                # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل معالجتها
-                clean_title = _clean_title(raw_title)
 
                 published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
                 published_dt = (
@@ -107,6 +112,7 @@ def fetch_prioritized_news() -> list:
                 )
 
                 seen_links.add(link)
+                seen_titles.add(normalized_title)
                 all_news.append({
                     "title": clean_title,
                     "link": link,
