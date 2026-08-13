@@ -24,28 +24,24 @@ def mark_db_record(url: str, title: str, status: str):
     elif hasattr(db, "save_article"):
         db.save_article(url, title, status)
     else:
-        # إذا لم تتطابق الأسماء يتم الحفظ بالطريقة المباشرة المعتادة
         try:
-            db.is_processed(url) # ضمان استدعاء db بدون استثناء
+            if hasattr(db, "is_processed"):
+                db.is_processed(url)
         except Exception:
             pass
 
 
 def map_category_names_to_ids(category_names: list) -> list:
-    """تحويل أسماء التصنيفات إلى IDs من config.json"""
-    categories_map = CONFIG.get("categories", {})
-    category_ids = []
-
-    if isinstance(categories_map, dict):
-        for name in category_names:
-            if name in categories_map:
-                category_ids.append(categories_map[name])
-    elif isinstance(categories_map, list):
-        for cat in categories_map:
-            if isinstance(cat, dict) and cat.get("name") in category_names:
-                category_ids.append(cat.get("id"))
-
-    return category_ids
+    """
+    إعادة التصنيفات المحددة بواسطة الذكاء الاصطناعي.
+    إذا كانت التصنيفات في config قائمة أسماء، نمرر الأسماء المتقاطعة مباشرة لموديول النشر.
+    """
+    configured_categories = CONFIG.get("categories", [])
+    if isinstance(configured_categories, list):
+        # تصفية الأسماء المطابقة فقط الموجودة في config
+        matched = [cat for cat in category_names if cat in configured_categories]
+        return matched if matched else category_names
+    return category_names
 
 
 def run_pipeline():
@@ -105,14 +101,14 @@ def run_pipeline():
         rewritten_content = ai_result["rewritten_content"]
         category_names = ai_result.get("categories", [])
 
-        # 4. مطابقة أسماء التصنيفات بـ IDs
-        category_ids = map_category_names_to_ids(category_names)
+        # 4. مطابقة التصنيفات
+        categories_to_publish = map_category_names_to_ids(category_names)
 
         # 5. نشر المقال في ووردبريس
         site_url = publish_post(
             title=rewritten_title,
             content=rewritten_content,
-            categories=category_ids
+            categories=categories_to_publish
         )
 
         if site_url:
