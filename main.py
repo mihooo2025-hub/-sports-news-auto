@@ -1,122 +1,100 @@
 """
 main.py
 =======
-الملف الرئيسي لتشغيل الدورة بأسلوب الفحص النصي الأولي والمراجعة الذكية للحد من التكرار.
+الملف الرئيسي لإدارة دورة جلب الأخبار، معالجتها عبر الذكاء الاصطناعي،
+نشرها في ووردبريس، وإرسال تقارير المتابعة عبر تلجرام.
 """
 
-import time
-
-from config import CONFIG
-from db import is_processed, mark_processed, get_recent_titles
+import sys
+import db
 from rss_fetcher import fetch_prioritized_news
-from article_extractor import extract_article
-from content_ai import process_article, is_semantic_duplicate
-from wordpress_publisher import create_draft_post, test_authentication
+from article_scraper import fetch_full_article
+from content_ai import process_article
+from category_mapper import map_category_names_to_ids
+from wordpress_publisher import publish_post
 from telegram_reporter import send_cycle_report, send_error_alert
 
 
-def run_cycle():
-    print("=" * 60)
-    print("🔄 بدء دورة جلب ونشر جديدة...")
-    print("=" * 60)
+def run_pipeline():
+    print("🚀 بدء دورة جلب ونشر الأخبار الرياضية...")
+    
+    # تهيئة قاعدة البيانات Local DB
+    db.init_db()
 
-    if not test_authentication():
-        error_msg = "فشلت المصادقة مع ووردبريس — تم إيقاف الدورة قبل استهلاك أي رصيد OpenAI."
-        print(f"\n⛔ {error_msg}")
-        send_error_alert(error_msg)
+    # 1. جلب قائمة الأخبار غير المكررة
+    news_items = fetch_prioritized_news()
+    checked_count = len(news_items)
+
+    if not news_items:
+        print("ℹ️ لم يتم العثور على أخبار جديدة في هذه الدورة.")
+        send_cycle_report([], 0, 0)
         return
 
-    max_checked = CONFIG["fetch_settings"].get("max_articles_checked_per_cycle", 200)
-    max_published = CONFIG["fetch_settings"].get("max_articles_published_per_cycle", 40)
-
-    news_items = fetch_prioritized_news()
-    print(f"📰 تم جلب {len(news_items)} خبر محتمل للفحص (الحد الأقصى: {max_checked}).")
+    print(f"🔍 تم العثور على {checked_count} خبر جديد للبدء في المعالجة...")
 
     published_items = []
-    checked_count = 0
     skipped_count = 0
 
-    for item in news_items:
-        if checked_count >= max_checked:
-            print(f"⏸️ تم الوصول لحد الفحص الأقصى ({max_checked} خبر).")
-            break
-        if len(published_items) >= max_published:
-            print(f"⏸️ تم الوصول لحد النشر الأقصى ({max_published} مقال).")
-            break
+    for idx, item in enumerate(news_items, start=1):
+        source_title = item.get("title", "")
+        source_link = item.get("link", "")
+        matched_keyword = item.get("matched_keyword", "")
 
-        link = item["link"]
-        title = item["title"]
+        print(f"\n[{idx}/{checked_count}] جاري معالجة الخبر: {source_title}")
 
-        if is_processed(link):
-            continue
-
-        checked_count += 1
-        print(f"\n➡️ [{checked_count}/{max_checked}] معالجة: {title}")
-
-        # الفحص النصي الأولي مع المراجعة الذكية لأحدث 40 خبراً
-        recent_titles = get_recent_titles(limit=40)
-        if is_semantic_duplicate(title, recent_titles):
-            print("⏭️ تم تجاوز الخبر — الفحص أثبت وجود خبر مكرر بالكلمات أو بنفس المعنى.")
-            mark_processed(link, title=title, status="skipped_semantic_duplicate")
+        # 2. كشط نص المقال الأصلي
+        raw_content = fetch_full_article(source_link)
+        if not raw_content:
+            print("⚠️ تعذر جلب محتوى المقال — سيتم التجاوز.")
+            db.mark_as_processed(source_link, source_title, status="skipped_no_content")
             skipped_count += 1
             continue
 
-        article_data = extract_article(link)
-
-        if article_data.get("blocked"):
-            mark_processed(link, title=title, status="skipped_blocked_domain")
-            skipped_count += 1
-            continue
-
-        if not article_data["success"]:
-            print("⏭️ تم تجاوز الخبر — تعذر استخراج نص كافٍ منه.")
-            mark_processed(link, title=title, status="skipped_no_content")
-            skipped_count += 1
-            continue
-
-        # تجاوز الخبر إذا لم يتم العثور على صورة بارزة
-        if not article_data.get("image_url"):
-            print("⏭️ تم تجاوز الخبر — تعذر العثور على صورة بارزة.")
-            mark_processed(link, title=title, status="skipped_no_image")
-            skipped_count += 1
-            continue
-
-        ai_result = process_article(
-            raw_text=article_data["text"],
-            source_title=title,
-            matched_keyword=item.get("matched_keyword", ""),
-        )
+        # 3. إعادة الصياغة وإنشاء العنوان بالتصنيفات بواسطة OpenAI
+        ai_result = process_article(raw_content, source_title, matched_keyword)
         if not ai_result:
-            print("⏭️ تم تجاوز الخبر — فشلت معالجة الذكاء الاصطناعي.")
-            mark_processed(link, title=title, status="skipped_ai_failed")
+            print("⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي — سيتم التجاوز.")
+            db.mark_as_processed(source_link, source_title, status="skipped_ai_error")
             skipped_count += 1
             continue
 
-        generated_title = ai_result.get("title", "")
+        rewritten_title = ai_result["title"]
+        rewritten_content = ai_result["rewritten_content"]
+        category_names = ai_result.get("categories", [])
 
-        post_data = create_draft_post(
-            ai_result=ai_result,
-            source_url=article_data["resolved_url"],
-            image_url=article_data["image_url"],
+        # 4. مطابقة أسماء التصنيفات بـ IDs في ووردبريس
+        category_ids = map_category_names_to_ids(category_names)
+
+        # 5. نشر المقال في ووردبريس والحصول على رابط المقال الجديد
+        site_url = publish_post(
+            title=rewritten_title,
+            content=rewritten_content,
+            categories=category_ids
         )
 
-        if post_data:
-            mark_processed(link, title=generated_title, wp_post_id=post_data.get("id"), status="published_draft")
+        if site_url:
+            print(f"✅ تم النشر بنجاح: {site_url}")
+            db.mark_as_processed(source_link, rewritten_title, status="published")
             published_items.append({
-                "title": generated_title,
-                "source_url": article_data["resolved_url"],
-                "wp_link": post_data.get("link", ""),
+                "title": rewritten_title,
+                "source_url": source_link,
+                "site_url": site_url,
             })
         else:
-            mark_processed(link, title=generated_title, status="skipped_wp_failed")
+            print("❌ فشل النشر في ووردبريس.")
+            db.mark_as_processed(source_link, source_title, status="publish_failed")
             skipped_count += 1
 
-        time.sleep(2)
-
-    print(f"\n✅ انتهت الدورة — نُشر {len(published_items)} مسودة، فُحص {checked_count}، تُجووِز {skipped_count}.")
-
+    # 6. إرسال تقرير الدورة إلى تلجرام
     send_cycle_report(published_items, checked_count, skipped_count)
+    print("\n🎉 اكتملت الدورة بنجاح.")
 
 
 if __name__ == "__main__":
-    run_cycle()
+    try:
+        run_pipeline()
+    except Exception as e:
+        error_msg = f"حدث خطأ غير متوقع أثناء تنفيذ الدورة: {e}"
+        print(f"💥 {error_msg}")
+        send_error_alert(error_msg)
+        sys.exit(1)
