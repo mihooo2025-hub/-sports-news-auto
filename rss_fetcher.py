@@ -1,11 +1,10 @@
 """
 rss_fetcher.py
 ==============
-يجلب الأخبار الرياضية المباشرة من كووورة عبر Google News RSS:
+يجلب جميع الأخبار الرياضية المتاحة كليًا من كووورة عبر Google News RSS:
 - يتجاوز حظر السيرفرات وCloudflare كليًا.
-- فلترة زمنية للأخبار المنشورة خلال آخر 6 ساعات فقط.
-- جلب الأخبار حسب الأحدث زمنياً وبدون أي أولوية للكلمات المفتاحية.
-- حد أقصى 10 أخبار في الدورة الواحدة.
+- يجلب كل الأخبار المنشورة خلال آخر 6 ساعات دون تحديد حد أقصى للعدد.
+- جلب الأخبار حسب الأحدث زمنياً.
 - منع التكرار القاطع عبر فحص الرابط المباشر في db.
 """
 
@@ -65,7 +64,6 @@ def _fetch_feed_content(url: str) -> bytes:
 def fetch_prioritized_news() -> list:
     settings = CONFIG["fetch_settings"]
     max_age = settings.get("max_article_age_hours", 6)
-    max_checked = settings.get("max_articles_checked_per_cycle", 10)
     sources = CONFIG.get("rss_sources", [])
 
     all_news = []
@@ -98,7 +96,7 @@ def fetch_prioritized_news() -> list:
                 if not _is_recent(entry, max_age):
                     continue
 
-                # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل إرسالها للذكاء الاصطناعي
+                # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل معالجتها
                 clean_title = _clean_title(raw_title)
 
                 published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -121,11 +119,11 @@ def fetch_prioritized_news() -> list:
             print(f"⚠️ فشل جلب الأخبار من المصدر '{source_name}': {e}")
             continue
 
-    # الترتيب حسب الوقت فقط (الأحدث أولاً)
+    # الترتيب حسب الوقت (الأحدث أولاً)
     all_news.sort(key=lambda x: x["published_dt"], reverse=True)
 
-    final_results = all_news[:max_checked]
-    for news in final_results:
+    # إزالة التاريخ المساعد وإعادة كافة الأخبار المتاحة بدون تقييد للعدد
+    for news in all_news:
         news.pop("published_dt", None)
 
-    return final_results
+    return all_news
