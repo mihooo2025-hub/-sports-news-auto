@@ -7,12 +7,33 @@ main.py
 
 import sys
 import db
+from config import CONFIG
 from rss_fetcher import fetch_prioritized_news
 from article_extractor import extract_article
 from content_ai import process_article
-from category_mapper import map_category_names_to_ids
 from wordpress_publisher import publish_post
 from telegram_reporter import send_cycle_report, send_error_alert
+
+
+def map_category_names_to_ids(category_names: list) -> list:
+    """
+    تحويل أسماء التصنيفات التي يرجعها الذكاء الاصطناعي إلى المعرفات (IDs)
+    الموجودة في config.json
+    """
+    categories_map = CONFIG.get("categories", {})
+    category_ids = []
+
+    if isinstance(categories_map, dict):
+        for name in category_names:
+            if name in categories_map:
+                category_ids.append(categories_map[name])
+    elif isinstance(categories_map, list):
+        # في حال كانت القائمة في config.json تحتوي على الكائنات بشكل مباشر
+        for cat in categories_map:
+            if isinstance(cat, dict) and cat.get("name") in category_names:
+                category_ids.append(cat.get("id"))
+
+    return category_ids
 
 
 def run_pipeline():
@@ -54,7 +75,6 @@ def run_pipeline():
 
         raw_content = extracted_data.get("text", "")
         resolved_url = extracted_data.get("resolved_url") or source_link
-        image_url = extracted_data.get("image_url")
 
         if not extracted_data.get("success") or not raw_content:
             print("⚠️ تعذر جلب محتوى المقال أو المحتوى قصير جدًا — سيتم التجاوز.")
@@ -74,7 +94,7 @@ def run_pipeline():
         rewritten_content = ai_result["rewritten_content"]
         category_names = ai_result.get("categories", [])
 
-        # 4. مطابقة أسماء التصنيفات بـ IDs في ووردبريس
+        # 4. مطابقة أسماء التصنيفات بـ IDs
         category_ids = map_category_names_to_ids(category_names)
 
         # 5. نشر المقال في ووردبريس والحصول على رابط المقال الجديد
@@ -89,8 +109,8 @@ def run_pipeline():
             db.mark_as_processed(source_link, rewritten_title, status="published")
             published_items.append({
                 "title": rewritten_title,
-                "source_url": resolved_url,  # الرابط الأصلي المفكوك
-                "site_url": site_url,         # رابط الخبر الجديد في موقعك
+                "source_url": resolved_url,  # الرابط الأصلي
+                "site_url": site_url,         # رابط الخبر الجديد
             })
         else:
             print("❌ فشل النشر في ووردبريس.")
