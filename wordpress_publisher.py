@@ -12,25 +12,42 @@ from config import CONFIG
 WP_CONFIG = CONFIG.get("wordpress", {})
 WP_URL = WP_CONFIG.get("site_url", "").rstrip("/")
 WP_USER = WP_CONFIG.get("username", "")
-WP_APP_PASSWORD = WP_CONFIG.get("application_password", "")
+
+# القراءة المرنة لمفتاح كلمة مرور التطبيق لدعم المسميين (app_password و application_password)
+WP_APP_PASSWORD = WP_CONFIG.get("app_password") or WP_CONFIG.get("application_password", "")
 
 
 def publish_post(title: str, content: str, categories: list) -> str | None:
     """
     يقوم بنشر المقال إلى ووردبريس ويرجع رابط المقال المنشور على الموقع عند النجاح.
     """
-    if not WP_URL or not WP_USER or not WP_APP_PASSWORD:
-        print("❌ بيانات اعتماد ووردبريس غير مكتملة في config.json")
+    # التحقق من أن القيمة ليست فارغة وليست النص الافتراضي للتجربة
+    is_invalid = (
+        not WP_URL 
+        or not WP_USER 
+        or not WP_APP_PASSWORD 
+        or "PASTE_YOUR" in WP_USER 
+        or "PASTE_YOUR" in WP_APP_PASSWORD 
+        or "example.com" in WP_URL
+    )
+
+    if is_invalid:
+        print("❌ بيانات اعتماد ووردبريس غير مكتملة أو تحتوي على القيم الافتراضية في config.json")
         return None
 
     endpoint = f"{WP_URL}/wp-json/wp/v2/posts"
+
+    # التأكد من هئية التصنيفات المقبولة لدى ووردبريس
+    valid_categories = [cat for cat in categories if isinstance(cat, int)]
 
     payload = {
         "title": title,
         "content": content,
         "status": "publish",
-        "categories": categories,
     }
+    
+    if valid_categories:
+        payload["categories"] = valid_categories
 
     try:
         response = requests.post(
