@@ -3,7 +3,7 @@ telegram_reporter.py
 =====================
 Sends a summary report to a Telegram group via Bot after each execution cycle:
 - Titles of rewritten and published articles.
-- Links to original source articles.
+- Links to original source articles and published site articles.
 
 Requires Telegram Bot Token (from BotFather) and Group ID (chat_id) in config.json
 or provided via environment variables (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).
@@ -60,7 +60,7 @@ def _chunk_message(lines: list, header: str) -> list:
 
 def send_cycle_report(published_items: list, checked_count: int, skipped_count: int):
     """
-    published_items: list of dicts {"title": article title, "source_url": original url}
+    published_items: list of dicts {"title": article title, "source_url": original url, "site_url": new published url}
     """
     if not _is_configured():
         print("ℹ️ Telegram credentials not configured — skipping report dispatch.")
@@ -81,8 +81,14 @@ def send_cycle_report(published_items: list, checked_count: int, skipped_count: 
     lines = []
     for i, item in enumerate(published_items, start=1):
         title = item.get("title", "بدون عنوان")
-        source_url = item.get("source_url", "")
-        lines.append(f"\n{i}. <b>{title}</b>\n🔗 المصدر: {source_url}")
+        source_url = item.get("source_url", "غير متوفر")
+        site_url = item.get("site_url") or item.get("post_url") or "غير متوفر"
+        
+        lines.append(
+            f"\n{i}. <b>{title}</b>\n"
+            f"🔗 المصدر الأصلي (القديم): {source_url}\n"
+            f"🌐 الخبر الجديد (الموقع): {site_url}"
+        )
 
     for chunk in _chunk_message(lines, header):
         _send_message(chunk)
