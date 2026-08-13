@@ -16,9 +16,6 @@ from config import CONFIG
 import db
 
 EXCLUDED_SPORTS_KEYWORDS = [
-    # كلمات اسم الموقع المراد استبعادها من العناوين
-    "كووورة", "كوووره", "kooora",
-    
     # الرياضات الأخرى المستبعدة
     "كرة السلة", "السلة", "بطولة السلة", "NBA", "دوري السلة",
     "التنس", "ويمبلدون", "رولان جاروس", "بطولة التنس",
@@ -42,6 +39,14 @@ def _is_recent(entry, max_age_hours: int) -> bool:
         return age <= timedelta(hours=max_age_hours)
     except Exception:
         return True
+
+
+def _clean_title(title: str) -> str:
+    """تنظيف العنوان من ملحق اسم الموقع القادم من Google News (مثل - كووورة)"""
+    for tag in [" - كووورة", " - كوووره", " - Kooora", " - kooora"]:
+        if title.endswith(tag):
+            title = title[:-len(tag)].strip()
+    return title
 
 
 def _is_football_only(title: str) -> bool:
@@ -78,20 +83,23 @@ def fetch_prioritized_news() -> list:
             feed = feedparser.parse(raw_data)
 
             for entry in feed.entries:
-                title = entry.get("title", "").strip()
+                raw_title = entry.get("title", "").strip()
                 link = entry.get("link", "").strip()
 
-                if not title or not link or link in seen_links:
+                if not raw_title or not link or link in seen_links:
                     continue
 
                 if db.is_processed(link):
                     continue
 
-                if not _is_football_only(title):
+                if not _is_football_only(raw_title):
                     continue
 
                 if not _is_recent(entry, max_age):
                     continue
+
+                # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل إرسالها للذكاء الاصطناعي
+                clean_title = _clean_title(raw_title)
 
                 published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
                 published_dt = (
@@ -102,7 +110,7 @@ def fetch_prioritized_news() -> list:
 
                 seen_links.add(link)
                 all_news.append({
-                    "title": title,
+                    "title": clean_title,
                     "link": link,
                     "published": entry.get("published", ""),
                     "published_dt": published_dt,
@@ -113,7 +121,7 @@ def fetch_prioritized_news() -> list:
             print(f"⚠️ فشل جلب الأخبار من المصدر '{source_name}': {e}")
             continue
 
-    # الترتيب حسب الوقت فقط (الأحدث أولاً) بدون أي أولوية لأي فريق أو موضوع
+    # الترتيب حسب الوقت فقط (الأحدث أولاً)
     all_news.sort(key=lambda x: x["published_dt"], reverse=True)
 
     final_results = all_news[:max_checked]
