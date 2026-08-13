@@ -74,6 +74,13 @@ def run_cycle():
             skipped_count += 1
             continue
 
+        # تجاوز الخبر إذا لم يتم العثور على صورة بارزة
+        if not article_data.get("image_url"):
+            print("⏭️ تم تجاوز الخبر — تعذر العثور على صورة بارزة.")
+            mark_processed(link, title=title, status="skipped_no_image")
+            skipped_count += 1
+            continue
+
         ai_result = process_article(
             raw_text=article_data["text"],
             source_title=title,
