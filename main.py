@@ -8,7 +8,7 @@ main.py
 import sys
 import db
 from rss_fetcher import fetch_prioritized_news
-from article_extractor import fetch_full_article
+from article_extractor import extract_article
 from content_ai import process_article
 from category_mapper import map_category_names_to_ids
 from wordpress_publisher import publish_post
@@ -42,10 +42,22 @@ def run_pipeline():
 
         print(f"\n[{idx}/{checked_count}] جاري معالجة الخبر: {source_title}")
 
-        # 2. كشط نص المقال الأصلي
-        raw_content = fetch_full_article(source_link)
-        if not raw_content:
-            print("⚠️ تعذر جلب محتوى المقال — سيتم التجاوز.")
+        # 2. استخراج المقال ورابطه الأصلي والصورة باستخدام article_extractor
+        extracted_data = extract_article(source_link)
+
+        # التحقق مما إذا كان النطاق حُظر أو فشل استخراج النص
+        if extracted_data.get("blocked"):
+            print("🚫 تجاوز الخبر لأنه ينتمي لنطاق ممنوع.")
+            db.mark_as_processed(source_link, source_title, status="skipped_blocked_domain")
+            skipped_count += 1
+            continue
+
+        raw_content = extracted_data.get("text", "")
+        resolved_url = extracted_data.get("resolved_url") or source_link
+        image_url = extracted_data.get("image_url")
+
+        if not extracted_data.get("success") or not raw_content:
+            print("⚠️ تعذر جلب محتوى المقال أو المحتوى قصير جدًا — سيتم التجاوز.")
             db.mark_as_processed(source_link, source_title, status="skipped_no_content")
             skipped_count += 1
             continue
@@ -77,8 +89,8 @@ def run_pipeline():
             db.mark_as_processed(source_link, rewritten_title, status="published")
             published_items.append({
                 "title": rewritten_title,
-                "source_url": source_link,
-                "site_url": site_url,
+                "source_url": resolved_url,  # الرابط الأصلي المفكوك
+                "site_url": site_url,         # رابط الخبر الجديد في موقعك
             })
         else:
             print("❌ فشل النشر في ووردبريس.")
