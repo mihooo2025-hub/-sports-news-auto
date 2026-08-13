@@ -82,8 +82,8 @@ def send_cycle_report(published_items: list, checked_count: int, skipped_count: 
     for i, item in enumerate(published_items, start=1):
         title = item.get("title", "بدون عنوان")
         source_url = item.get("source_url", "غير متوفر")
-        site_url = item.get("site_url") or item.get("post_url") or item.get("link") or "غير متوفر"
-
+        site_url = item.get("site_url") or item.get("post_url") or "غير متوفر"
+        
         lines.append(
             f"\n{i}. <b>{title}</b>\n"
             f"🔗 المصدر الأصلي (القديم): {source_url}\n"
