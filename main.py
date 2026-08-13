@@ -2,7 +2,7 @@
 main.py
 =======
 الملف الرئيسي لإدارة دورة جلب الأخبار، معالجتها عبر الذكاء الاصطناعي،
-نشرها في ووردبريس، وإرسال تقارير المتابعة عبر تلجرام.
+نشرها في ووردبريس مع الصور البارزة، وإرسال تقارير المتابعة عبر تلجرام.
 """
 
 import sys
@@ -81,6 +81,7 @@ def run_pipeline():
             continue
 
         raw_content = extracted_data.get("text", "")
+        image_url = extracted_data.get("image_url") or extracted_data.get("image") or item.get("image_url")
         resolved_url = extracted_data.get("resolved_url") or source_link
 
         if not extracted_data.get("success") or not raw_content:
@@ -104,15 +105,16 @@ def run_pipeline():
         # 4. مطابقة التصنيفات
         categories_to_publish = map_category_names_to_ids(category_names)
 
-        # 5. نشر المقال في ووردبريس
+        # 5. نشر المقال في ووردبريس مع رفع الصورة البارزة
         site_url = publish_post(
             title=rewritten_title,
             content=rewritten_content,
-            categories=categories_to_publish
+            categories=categories_to_publish,
+            image_url=image_url
         )
 
         if site_url:
-            print(f"✅ تم النشر بنجاح: {site_url}")
+            print(f"✅ تم النشر بنجاح مع الصورة: {site_url}")
             mark_db_record(source_link, rewritten_title, "published")
             published_items.append({
                 "title": rewritten_title,
