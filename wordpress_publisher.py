@@ -5,7 +5,7 @@ wordpress_publisher.py
 - Uploads featured image to WordPress Media Library.
 - Resolves category names to Category IDs via WordPress REST API.
   Never creates new categories — if no match is found, the category is omitted.
-- Creates post draft with featured image and resolved categories.
+- Creates published post directly with featured image and resolved categories.
 """
 
 import base64
@@ -213,7 +213,7 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
     post_payload = {
         "title": main_title,
         "content": ai_result["rewritten_content"],
-        "status": "draft",
+        "status": "publish",
         "categories": category_ids,
     }
     if media_id:
@@ -232,7 +232,7 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
         )
         resp.raise_for_status()
         post_data = resp.json()
-        print(f"✅ Draft created successfully: {post_data.get('link', post_data.get('id'))}")
+        print(f"✅ Article published successfully: {post_data.get('link', post_data.get('id'))}")
         return post_data
     except Exception as e:
         print(f"❌ Failed to create WordPress post: {e}")
