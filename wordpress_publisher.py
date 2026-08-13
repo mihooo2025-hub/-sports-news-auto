@@ -239,3 +239,44 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
         if hasattr(e, "response") and e.response is not None:
             print(f"Error details: {e.response.text[:500]}")
         return None
+
+
+def publish_post(title: str, content: str, categories: list = None, image_url: str = None) -> str | None:
+    """
+    الدالة التي يتم استدعاؤها من main.py لنشر المقال وإرجاع رابط المنشور عند النجاح.
+    """
+    site_url, auth, _, auth_header = _get_wp_credentials()
+
+    media_id = upload_featured_image(image_url, alt_text=title) if image_url else None
+    category_ids = resolve_category_ids(categories) if categories else []
+
+    post_payload = {
+        "title": title,
+        "content": content,
+        "status": "publish",
+        "categories": category_ids,
+    }
+    if media_id:
+        post_payload["featured_media"] = media_id
+
+    headers = HEADERS_JSON.copy()
+    headers.update(auth_header)
+
+    try:
+        resp = requests.post(
+            f"{site_url}/wp-json/wp/v2/posts",
+            auth=auth,
+            json=post_payload,
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        post_data = resp.json()
+        post_link = post_data.get("link")
+        print(f"✅ Article published successfully: {post_link or post_data.get('id')}")
+        return post_link
+    except Exception as e:
+        print(f"❌ Failed to create WordPress post: {e}")
+        if hasattr(e, "response") and e.response is not None:
+            print(f"Error details: {e.response.text[:500]}")
+        return None
