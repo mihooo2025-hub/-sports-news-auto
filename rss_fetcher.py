@@ -2,15 +2,13 @@
 rss_fetcher.py
 ==============
 يجلب جميع الأخبار الرياضية المتاحة كليًا من كووورة عبر Google News RSS:
-- يتجاوز حظر السيرفرات وCloudflare كليًا عبر حزم طلبات محاكية للمتصفحات.
+- يتجاوز حظر السيرفرات وCloudflare كليًا.
 - يجلب كل الأخبار المنشورة خلال آخر 6 ساعات دون تحديد حد أقصى للعدد.
 - جلب الأخبار حسب الأحدث زمنياً.
 - منع التكرار القاطع عبر فحص الرابط المباشر في db.
 """
 
 import urllib.request
-import urllib.error
-import time
 from datetime import datetime, timezone, timedelta
 import feedparser
 from config import CONFIG
@@ -55,38 +53,16 @@ def _is_football_only(title: str) -> bool:
 
 
 def _fetch_feed_content(url: str) -> bytes:
-    """
-    جلب محتوى الخلاصة مع إعادة المحاولة وتمرير ترويسات محاكية لمصفحات كروم الحديثة
-    لتجاوز حظر 503 من سيرفرات جوجل.
-    """
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ar,en-US;q=0.7,en;q=0.3",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-
-    # محاولة الجلب حتى 3 مرات في حال حدوث مؤقت لخطأ 503
-    for attempt in range(1, 4):
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as response:
-                return response.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 503 and attempt < 3:
-                time.sleep(2)  # الانتظار ثانيتين قبل إعادة المحاولة
-                continue
-            raise e
-        except Exception as e:
-            if attempt < 3:
-                time.sleep(2)
-                continue
-            raise e
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=15) as response:
+        return response.read()
 
 
 def fetch_prioritized_news() -> list:
-    settings = CONFIG.get("fetch_settings", {})
+    settings = CONFIG["fetch_settings"]
     max_age = settings.get("max_article_age_hours", 6)
     sources = CONFIG.get("rss_sources", [])
 
@@ -111,7 +87,7 @@ def fetch_prioritized_news() -> list:
                 if not raw_title or not link or link in seen_links:
                     continue
 
-                if hasattr(db, "is_processed") and db.is_processed(link):
+                if db.is_processed(link):
                     continue
 
                 if not _is_football_only(raw_title):
@@ -120,6 +96,7 @@ def fetch_prioritized_news() -> list:
                 if not _is_recent(entry, max_age):
                     continue
 
+                # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل معالجتها
                 clean_title = _clean_title(raw_title)
 
                 published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
