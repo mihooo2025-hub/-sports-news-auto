@@ -1,117 +1,241 @@
 """
 wordpress_publisher.py
-======================
-يقوم بنشر المقالات المُصاغة إلى موقع ووردبريس عبر REST API:
-- رفع الصورة البارزة (Featured Media) وتعيينها للمقال.
-- إنشاء المقال بنص HTML والتصنيفات المحددة.
-- إرجاع رابط المقال المنشور المباشر على الموقع (link).
+=======================
+- Validates credentials before processing (test_authentication).
+- Uploads featured image to WordPress Media Library.
+- Resolves category names to Category IDs via WordPress REST API.
+  Never creates new categories — if no match is found, the category is omitted.
+- Creates published post directly with featured image and resolved categories.
 """
 
+import base64
 import requests
+from requests.auth import HTTPBasicAuth
 from config import CONFIG
 
-WP_CONFIG = CONFIG.get("wordpress", {})
-WP_URL = WP_CONFIG.get("site_url", "").rstrip("/")
-WP_USER = WP_CONFIG.get("username", "")
-WP_APP_PASSWORD = WP_CONFIG.get("app_password") or WP_CONFIG.get("application_password", "")
+# ترويسات موحدة وشاملة لمحاكاة متصفح حقيقي بالكامل وتجاوز فحص البوتات (Bot Verification)
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Sec-Ch-Ua": '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+HEADERS_GET = DEFAULT_HEADERS.copy()
+
+HEADERS_JSON = DEFAULT_HEADERS.copy()
+HEADERS_JSON["Content-Type"] = "application/json"
+
+# توافقية مع اسم المتغير القديم
+HEADERS_WP = HEADERS_JSON
+
+HEADERS_IMAGE = {
+    "User-Agent": DEFAULT_HEADERS["User-Agent"],
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+}
+
+_category_cache = {}
 
 
-def upload_featured_image(image_url: str) -> int | None:
-    """رفع الصورة إلى ووردبريس وإرجاع الـ Media ID الخاص بها"""
+def _get_wp_credentials():
+    wp = CONFIG.get("wordpress", {})
+    site_url = wp.get("site_url", "").rstrip("/")
+    username = wp.get("username", "")
+    password = wp.get("app_password", "")
+    
+    auth = HTTPBasicAuth(username, password)
+    
+    # إنشـاء ترويسة Basic Auth يدوياً لتمريرها مع الطلبات لمنع حظرها من جدران الحماية
+    credentials = f"{username}:{password}"
+    encoded_auth = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+    auth_header = {"Authorization": f"Basic {encoded_auth}"}
+    
+    return site_url, auth, username, auth_header
+
+
+def test_authentication() -> bool:
+    """
+    Validates WordPress credentials before processing to avoid wasting API quota.
+    """
+    site_url, auth, username, auth_header = _get_wp_credentials()
+    
+    headers = HEADERS_GET.copy()
+    headers.update(auth_header)
+
+    try:
+        resp = requests.get(
+            f"{site_url}/wp-json/wp/v2/users/me",
+            auth=auth,
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            user_data = resp.json()
+            print(f"✅ WordPress authentication successful — User: {user_data.get('name', username)}")
+            return True
+
+        print(f"❌ WordPress authentication failed (Status code: {resp.status_code}).")
+        if resp.status_code == 401:
+            print(
+                "Possible reasons:\n"
+                "  1) Application Password expired/invalid — generate a new one.\n"
+                "  2) Typo in credentials.\n"
+                "  3) Username mismatch.\n"
+                "  4) Server/Hosting stripping Authorization header."
+            )
+        else:
+            print(f"Details: {resp.text[:300]}")
+        return False
+
+    except Exception as e:
+        print(f"❌ Connection to WordPress failed: {e}")
+        return False
+
+
+def _get_category_id(name: str) -> int | None:
+    """
+    Looks up an existing category ID by name.
+    Does not create new categories — returns None if not found.
+    """
+    if name in _category_cache:
+        return _category_cache[name]
+
+    site_url, auth, _, auth_header = _get_wp_credentials()
+
+    headers = HEADERS_GET.copy()
+    headers.update(auth_header)
+
+    try:
+        resp = requests.get(
+            f"{site_url}/wp-json/wp/v2/categories",
+            params={"search": name, "per_page": 5},
+            auth=auth,
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for cat in resp.json():
+            if cat["name"].strip() == name.strip():
+                _category_cache[name] = cat["id"]
+                return cat["id"]
+
+        print(f"⚠️ Category '{name}' not found in WordPress — post will be created without it.")
+        return None
+
+    except Exception as e:
+        print(f"⚠️ Category search failed for '{name}': {e}")
+
+    return None
+
+
+def resolve_category_ids(category_names: list) -> list:
+    ids = []
+    for name in category_names:
+        cat_id = _get_category_id(name)
+        if cat_id:
+            ids.append(cat_id)
+    return ids
+
+
+def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
     if not image_url:
         return None
 
+    site_url, auth, _, auth_header = _get_wp_credentials()
+
     try:
-        # تحميل الصورة من مصدرها
-        img_resp = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        if img_resp.status_code != 200:
-            return None
-
-        # استخراج اسم الصورة ونوعها
-        file_name = image_url.split("/")[-1].split("?")[0]
-        if not file_name.endswith((".jpg", ".jpeg", ".png", ".webp")):
-            file_name = "featured_image.jpg"
-
+        img_resp = requests.get(image_url, headers=HEADERS_IMAGE, timeout=15)
+        img_resp.raise_for_status()
         content_type = img_resp.headers.get("Content-Type", "image/jpeg")
-
-        # رفع الصورة إلى ووردبريس REST API
-        media_endpoint = f"{WP_URL}/wp-json/wp/v2/media"
-        headers = {
-            "Content-Disposition": f'attachment; filename="{file_name}"',
-            "Content-Type": content_type,
-        }
-
-        response = requests.post(
-            media_endpoint,
-            data=img_resp.content,
-            headers=headers,
-            auth=(WP_USER, WP_APP_PASSWORD),
-            timeout=30,
-        )
-
-        if response.status_code in (200, 201):
-            return response.json().get("id")
-        else:
-            print(f"⚠️ فشل رفع الصورة لـ WP: {response.status_code}")
+        if "image" not in content_type:
+            print(f"⚠️ URL does not contain valid image data (Content-Type: {content_type})")
             return None
 
+        ext = "jpg"
+        if "png" in content_type:
+            ext = "png"
+        elif "webp" in content_type:
+            ext = "webp"
+
+        filename = f"featured-{abs(hash(image_url)) % 10**8}.{ext}"
+
+        upload_headers = DEFAULT_HEADERS.copy()
+        upload_headers.update(auth_header)
+        upload_headers.update({
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": content_type,
+        })
+
+        upload_resp = requests.post(
+            f"{site_url}/wp-json/wp/v2/media",
+            auth=auth,
+            headers=upload_headers,
+            data=img_resp.content,
+            timeout=20,
+        )
+        upload_resp.raise_for_status()
+        media_data = upload_resp.json()
+        media_id = media_data["id"]
+
+        if alt_text:
+            alt_headers = HEADERS_JSON.copy()
+            alt_headers.update(auth_header)
+            requests.post(
+                f"{site_url}/wp-json/wp/v2/media/{media_id}",
+                auth=auth,
+                json={"alt_text": alt_text},
+                headers=alt_headers,
+                timeout=10,
+            )
+
+        return media_id
+
     except Exception as e:
-        print(f"⚠️ خطأ أثناء رفع الصورة البارزة: {e}")
+        print(f"⚠️ Featured image upload failed: {e}")
         return None
 
 
-def publish_post(title: str, content: str, categories: list, image_url: str = None) -> str | None:
-    """
-    يقوم بنشر المقال إلى ووردبريس ويرجع رابط المقال المنشور على الموقع عند النجاح.
-    """
-    is_invalid = (
-        not WP_URL 
-        or not WP_USER 
-        or not WP_APP_PASSWORD 
-        or "PASTE_YOUR" in WP_USER 
-        or "PASTE_YOUR" in WP_APP_PASSWORD 
-        or "example.com" in WP_URL
-    )
+def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict | None:
+    main_title = ai_result["title"]
+    site_url, auth, _, auth_header = _get_wp_credentials()
 
-    if is_invalid:
-        print("❌ بيانات اعتماد ووردبريس غير مكتملة أو تحتوي على القيم الافتراضية في config.json")
-        return None
+    media_id = upload_featured_image(image_url, alt_text=main_title)
+    category_ids = resolve_category_ids(ai_result.get("categories", []))
 
-    # رفع الصورة أولاً إذا كانت متوفرة
-    featured_media_id = upload_featured_image(image_url) if image_url else None
-
-    endpoint = f"{WP_URL}/wp-json/wp/v2/posts"
-    valid_categories = [cat for cat in categories if isinstance(cat, int)]
-
-    payload = {
-        "title": title,
-        "content": content,
+    post_payload = {
+        "title": main_title,
+        "content": ai_result["rewritten_content"],
         "status": "publish",
+        "categories": category_ids,
     }
-    
-    if valid_categories:
-        payload["categories"] = valid_categories
+    if media_id:
+        post_payload["featured_media"] = media_id
 
-    if featured_media_id:
-        payload["featured_media"] = featured_media_id
+    headers = HEADERS_JSON.copy()
+    headers.update(auth_header)
 
     try:
-        response = requests.post(
-            endpoint,
-            json=payload,
-            auth=(WP_USER, WP_APP_PASSWORD),
-            headers={"Content-Type": "application/json"},
-            timeout=30,
+        resp = requests.post(
+            f"{site_url}/wp-json/wp/v2/posts",
+            auth=auth,
+            json=post_payload,
+            headers=headers,
+            timeout=15,
         )
-
-        if response.status_code in (200, 201):
-            post_data = response.json()
-            published_url = post_data.get("link", "")
-            return published_url
-        else:
-            print(f"❌ فشل نشر المقال في ووردبريس: {response.status_code} - {response.text}")
-            return None
-
+        resp.raise_for_status()
+        post_data = resp.json()
+        print(f"✅ Article published successfully: {post_data.get('link', post_data.get('id'))}")
+        return post_data
     except Exception as e:
-        print(f"⚠️ خطأ أثناء الاتصال بـ REST API لووردبريس: {e}")
+        print(f"❌ Failed to create WordPress post: {e}")
+        if hasattr(e, "response") and e.response is not None:
+            print(f"Error details: {e.response.text[:500]}")
         return None
