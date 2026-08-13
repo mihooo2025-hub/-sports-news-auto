@@ -8,7 +8,7 @@ main.py
 import sys
 import db
 from rss_fetcher import fetch_prioritized_news
-from article_scraper import fetch_full_article
+from article_extractor import fetch_full_article
 from content_ai import process_article
 from category_mapper import map_category_names_to_ids
 from wordpress_publisher import publish_post
