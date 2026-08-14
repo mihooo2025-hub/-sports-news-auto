@@ -1,4 +1,4 @@
-name: نشر أخبار كرة القدم التلقائي (كل ساعة)
+Name: نشر أخبار كرة القدم التلقائي (كل ساعة)
 
 on:
   schedule:
@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: تنزيل نسخة المستودع
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: إعداد بايثون
         uses: actions/setup-python@v5
@@ -37,8 +39,11 @@ jobs:
 
       - name: حفظ قاعدة بيانات منع التكرار (news.db) داخل المستودع
         run: |
-          git config user.name "News Bot"
-          git config user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add news.db
-          git diff --staged --quiet && echo "لا تغييرات لحفظها" || git commit -m "تحديث news.db [skip ci]"
-          git push
+          if git commit -m "تحديث news.db [skip ci]"; then
+            git push origin HEAD:${{ github.ref }}
+          else
+            echo "لا يوجد تغييرات جديدة في قاعدة البيانات."
+          fi
