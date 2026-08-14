@@ -88,6 +88,10 @@ def fetch_prioritized_news() -> list:
                 if not raw_title or not link or link in seen_links:
                     continue
 
+                # تصفية الرياضات الأخرى غير كرة القدم فوراً
+                if not _is_football_only(raw_title):
+                    continue
+
                 # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل معالجتها
                 clean_title = _clean_title(raw_title)
                 normalized_title = clean_title.strip().lower()
@@ -95,10 +99,8 @@ def fetch_prioritized_news() -> list:
                 if normalized_title in seen_titles:
                     continue
 
+                # فحص التكرار في قاعدة البيانات بالرابط والعنوان المنظف
                 if db.is_processed(link, clean_title):
-                    continue
-
-                if not _is_football_only(raw_title):
                     continue
 
                 if not _is_recent(entry, max_age):
