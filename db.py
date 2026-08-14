@@ -32,11 +32,10 @@ def init_db():
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_url_hash ON processed_news(url_hash)
     """)
-    # ترحيل آمن: إضافة عمود title_hash لقاعدة البيانات القديمة (لو الملف موجود من قبل هذا التحديث)
     try:
         cur.execute("ALTER TABLE processed_news ADD COLUMN title_hash TEXT")
     except sqlite3.OperationalError:
-        pass  # العمود موجود بالفعل، لا داعي لأي إجراء
+        pass
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_title_hash ON processed_news(title_hash)
     """)
@@ -49,11 +48,6 @@ def _hash_url(url: str) -> str:
 
 
 def _normalize_title(title: str) -> str:
-    """
-    توحيد شكل العنوان قبل التجزئة، لأن روابط Google News RSS تتغير
-    في كل مرة لنفس الخبر (روابط تحويل مؤقتة)، فالاعتماد على الرابط
-    فقط لمنع التكرار غير كافٍ، لذلك نعتمد أيضاً على العنوان المطبَّع.
-    """
     if not title:
         return ""
     normalized = re.sub(r"\s+", " ", title).strip().lower()
@@ -67,7 +61,7 @@ def _hash_title(title: str) -> str:
 def is_processed(url: str, title: str = "") -> bool:
     """
     تحقق مما إذا كان الخبر قد تم جلبه أو معالجته مسبقاً،
-    عبر الرابط أو عبر العنوان (لأن رابط Google News يتغير لنفس الخبر).
+    عبر الرابط أو عبر العنوان.
     """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -88,9 +82,6 @@ def is_processed(url: str, title: str = "") -> bool:
 
 
 def get_recent_titles(limit: int = 40) -> list[str]:
-    """
-    يجلب أحدث العناوين المنشورة من قاعدة البيانات.
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
@@ -116,9 +107,14 @@ def mark_processed(url: str, title: str = "", wp_post_id: int = None, status: st
         )
         conn.commit()
     except sqlite3.IntegrityError:
-        pass  # مسجل بالفعل
+        pass
     finally:
         conn.close()
 
+
+# أسماء بديلة للتوافق مع الملفات الأخرى ومنع الأخطاء
+mark_as_processed = mark_processed
+add_processed_news = mark_processed
+save_article = mark_processed
 
 init_db()
