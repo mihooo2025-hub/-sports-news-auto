@@ -1,137 +1,141 @@
 """
-rss_fetcher.py
-==============
-يجلب جميع الأخبار الرياضية المتاحة كليًا من كووورة عبر Google News RSS:
-- يتجاوز حظر السيرفرات وCloudflare كليًا.
-- يجلب كل الأخبار المنشورة خلال آخر 6 ساعات دون تحديد حد أقصى للعدد.
-- جلب الأخبار حسب الأحدث زمنياً.
-- منع التكرار القاطع عبر فحص الرابط المباشر وعنوان الخبر في db.
+main.py
+=======
+الملف الرئيسي لإدارة دورة جلب الأخبار، معالجتها عبر الذكاء الاصطناعي،
+نشرها في ووردبريس مع الصور البارزة، وإرسال تقارير المتابعة عبر تلجرام.
 """
 
-import urllib.request
-from datetime import datetime, timezone, timedelta
-import feedparser
-from config import CONFIG
+import sys
 import db
-
-EXCLUDED_SPORTS_KEYWORDS = [
-    # الرياضات الأخرى المستبعدة
-    "كرة السلة", "السلة", "بطولة السلة", "NBA", "دوري السلة",
-    "التنس", "ويمبلدون", "رولان جاروس", "بطولة التنس",
-    "فورمولا 1", "فورمولا1", "الفورمولا", "F1",
-    "الكريكيت", "الرغبي", "الجولف", "الملاكمة",
-    "السباحة", "ألعاب القوى", "الجمباز",
-    "Basketball", "Baloncesto", "Tennis", "Tenis",
-    "Formula 1", "Fórmula 1", "Cricket", "Rugby", "Golf",
-    "Boxing", "Boxeo", "Swimming", "Natación",
-    "Baseball", "Béisbol", "NFL", "NHL", "MLB",
-]
+from config import CONFIG
+from rss_fetcher import fetch_prioritized_news
+from article_extractor import extract_article
+from content_ai import process_article
+from wordpress_publisher import publish_post
+from telegram_reporter import send_cycle_report, send_error_alert
 
 
-def _is_recent(entry, max_age_hours: int) -> bool:
-    published = entry.get("published_parsed") or entry.get("updated_parsed")
-    if not published:
-        return True
-    try:
-        published_dt = datetime(*published[:6], tzinfo=timezone.utc)
-        age = datetime.now(timezone.utc) - published_dt
-        return age <= timedelta(hours=max_age_hours)
-    except Exception:
-        return True
-
-
-def _clean_title(title: str) -> str:
-    """تنظيف العنوان من ملحق اسم الموقع القادم من Google News (مثل - كووورة)"""
-    for tag in [" - كووورة", " - كوووره", " - Kooora", " - kooora"]:
-        if title.endswith(tag):
-            title = title[:-len(tag)].strip()
-    return title
-
-
-def _is_football_only(title: str) -> bool:
-    return not any(bad_word.lower() in title.lower() for bad_word in EXCLUDED_SPORTS_KEYWORDS)
-
-
-def _fetch_feed_content(url: str) -> bytes:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=15) as response:
-        return response.read()
-
-
-def fetch_prioritized_news() -> list:
-    settings = CONFIG["fetch_settings"]
-    max_age = settings.get("max_article_age_hours", 6)
-    sources = CONFIG.get("rss_sources", [])
-
-    all_news = []
-    seen_links = set()
-    seen_titles = set()
-
-    for source in sources:
-        source_name = source.get("name", "مصدر رياضي")
-        source_url = source.get("url")
-
-        if not source_url:
-            continue
-
+def mark_db_record(url: str, title: str, status: str):
+    """دالة مرنة لتسجيل الخبر في قاعدة البيانات بحسب اسم الدالة المتاح في db.py"""
+    if hasattr(db, "mark_as_processed"):
+        db.mark_as_processed(url, title, status)
+    elif hasattr(db, "add_processed_news"):
+        db.add_processed_news(url, title, status)
+    elif hasattr(db, "save_article"):
+        db.save_article(url, title, status)
+    else:
         try:
-            raw_data = _fetch_feed_content(source_url)
-            feed = feedparser.parse(raw_data)
+            if hasattr(db, "is_processed"):
+                db.is_processed(url)
+        except Exception:
+            pass
 
-            for entry in feed.entries:
-                raw_title = entry.get("title", "").strip()
-                link = entry.get("link", "").strip()
 
-                if not raw_title or not link or link in seen_links:
-                    continue
+def map_category_names_to_ids(category_names: list) -> list:
+    """
+    إعادة التصنيفات المحددة بواسطة الذكاء الاصطناعي.
+    إذا كانت التصنيفات في config قائمة أسماء، نمرر الأسماء المتقاطعة مباشرة لموديول النشر.
+    """
+    configured_categories = CONFIG.get("categories", [])
+    if isinstance(configured_categories, list):
+        # تصفية الأسماء المطابقة فقط الموجودة في config
+        matched = [cat for cat in category_names if cat in configured_categories]
+        return matched if matched else category_names
+    return category_names
 
-                # تصفية الرياضات الأخرى غير كرة القدم فوراً
-                if not _is_football_only(raw_title):
-                    continue
 
-                # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل معالجتها
-                clean_title = _clean_title(raw_title)
-                normalized_title = clean_title.strip().lower()
+def run_pipeline():
+    print("🚀 بدء دورة جلب ونشر الأخبار الرياضية...")
+    
+    if hasattr(db, "init_db"):
+        db.init_db()
 
-                if normalized_title in seen_titles:
-                    continue
+    # 1. جلب قائمة الأخبار غير المكررة
+    news_items = fetch_prioritized_news()
+    checked_count = len(news_items)
 
-                # فحص التكرار في قاعدة البيانات بالرابط والعنوان المنظف
-                if db.is_processed(link, clean_title):
-                    continue
+    if not news_items:
+        print("ℹ️ لم يتم العثور على أخبار جديدة في هذه الدورة.")
+        send_cycle_report([], 0, 0)
+        return
 
-                if not _is_recent(entry, max_age):
-                    continue
+    print(f"🔍 تم العثور على {checked_count} خبر جديد للبدء في المعالجة...")
 
-                published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-                published_dt = (
-                    datetime(*published_parsed[:6], tzinfo=timezone.utc)
-                    if published_parsed
-                    else datetime.now(timezone.utc)
-                )
+    published_items = []
+    skipped_count = 0
 
-                seen_links.add(link)
-                seen_titles.add(normalized_title)
-                all_news.append({
-                    "title": clean_title,
-                    "link": link,
-                    "published": entry.get("published", ""),
-                    "published_dt": published_dt,
-                    "source": source_name,
-                    "matched_keyword": source_name,
-                })
-        except Exception as e:
-            print(f"⚠️ فشل جلب الأخبار من المصدر '{source_name}': {e}")
+    for idx, item in enumerate(news_items, start=1):
+        source_title = item.get("title", "")
+        source_link = item.get("link", "")
+        matched_keyword = item.get("matched_keyword", "")
+
+        print(f"\n[{idx}/{checked_count}] جاري معالجة الخبر: {source_title}")
+
+        # 2. استخراج المقال ورابطه الأصلي والصورة
+        extracted_data = extract_article(source_link)
+
+        if extracted_data.get("blocked"):
+            print("🚫 تجاوز الخبر لأنه ينتمي لنطاق ممنوع.")
+            mark_db_record(source_link, source_title, "skipped_blocked_domain")
+            skipped_count += 1
             continue
 
-    # الترتيب حسب الوقت (الأحدث أولاً)
-    all_news.sort(key=lambda x: x["published_dt"], reverse=True)
+        raw_content = extracted_data.get("text", "")
+        image_url = extracted_data.get("image_url") or extracted_data.get("image") or item.get("image_url")
+        resolved_url = extracted_data.get("resolved_url") or source_link
 
-    # إزالة التاريخ المساعد وإعادة كافة الأخبار المتاحة بدون تقييد للعدد
-    for news in all_news:
-        news.pop("published_dt", None)
+        if not extracted_data.get("success") or not raw_content:
+            print("⚠️ تعذر جلب محتوى المقال أو المحتوى قصير جدًا — سيتم التجاوز.")
+            mark_db_record(source_link, source_title, "skipped_no_content")
+            skipped_count += 1
+            continue
 
-    return all_news
+        # 3. إعادة الصياغة وإنشاء العنوان والتصنيفات بواسطة الذكاء الاصطناعي
+        ai_result = process_article(raw_content, source_title, matched_keyword)
+        if not ai_result:
+            print("⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي — سيتم التجاوز.")
+            mark_db_record(source_link, source_title, "skipped_ai_error")
+            skipped_count += 1
+            continue
+
+        rewritten_title = ai_result["title"]
+        rewritten_content = ai_result["rewritten_content"]
+        category_names = ai_result.get("categories", [])
+
+        # 4. مطابقة التصنيفات
+        categories_to_publish = map_category_names_to_ids(category_names)
+
+        # 5. نشر المقال في ووردبريس مع رفع الصورة البارزة
+        site_url = publish_post(
+            title=rewritten_title,
+            content=rewritten_content,
+            categories=categories_to_publish,
+            image_url=image_url
+        )
+
+        if site_url:
+            print(f"✅ تم النشر بنجاح مع الصورة: {site_url}")
+            mark_db_record(source_link, rewritten_title, "published")
+            published_items.append({
+                "title": rewritten_title,
+                "source_url": resolved_url,
+                "site_url": site_url,
+            })
+        else:
+            print("❌ فشل النشر في ووردبريس.")
+            mark_db_record(source_link, source_title, "publish_failed")
+            skipped_count += 1
+
+    # 6. إرسال تقرير الدورة إلى تلجرام
+    send_cycle_report(published_items, checked_count, skipped_count)
+    print("\n🎉 اكتملت الدورة بنجاح.")
+
+
+if __name__ == "__main__":
+    try:
+        run_pipeline()
+    except Exception as e:
+        error_msg = f"حدث خطأ غير متوقع أثناء تنفيذ الدورة: {e}"
+        print(f"💥 {error_msg}")
+        send_error_alert(error_msg)
+        sys.exit(1)
