@@ -6,6 +6,7 @@ main.py
 """
 
 import sys
+import time
 import db
 from config import CONFIG
 from rss_fetcher import fetch_prioritized_news
@@ -92,6 +93,10 @@ def run_pipeline():
 
         # 3. إعادة الصياغة وإنشاء العنوان والتصنيفات بواسطة الذكاء الاصطناعي
         ai_result = process_article(raw_content, source_title, matched_keyword)
+
+        # تأخير ثانيتين بعد كل عملية إعادة صياغة لمزيد من الدقة وتجنب الأخطاء
+        time.sleep(2)
+
         if not ai_result:
             print("⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي — سيتم التجاوز.")
             mark_db_record(source_link, source_title, "skipped_ai_error")
@@ -112,6 +117,9 @@ def run_pipeline():
             categories=categories_to_publish,
             image_url=image_url
         )
+
+        # تأخير ثانيتين بعد كل عملية نشر في ووردبريس لمزيد من الدقة وتجنب الأخطاء
+        time.sleep(2)
 
         if site_url:
             print(f"✅ تم النشر بنجاح مع الصورة: {site_url}")
