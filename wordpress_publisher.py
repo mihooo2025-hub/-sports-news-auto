@@ -48,18 +48,48 @@ def _get_wp_credentials():
 def _print_wp_error(resp, action="WordPress"):
     print(f"❌ {action} failed — HTTP {resp.status_code}")
 
+    # عرض معلومات مفيدة لمعرفة هل الرد جاء من Cloudflare/WAF
+    server = resp.headers.get("Server")
+    cf_ray = resp.headers.get("CF-Ray")
+    cf_mitigated = resp.headers.get("CF-Mitigated")
+
+    if server:
+        print(f"ℹ️ Server: {server}")
+
+    if cf_ray:
+        print(f"ℹ️ CF-Ray: {cf_ray}")
+
+    if cf_mitigated:
+        print(f"ℹ️ CF-Mitigated: {cf_mitigated}")
+
     if resp.status_code == 403:
-        if "Bot Verification" in resp.text:
+        if (
+            "Bot Verification" in resp.text
+            or "Cloudflare" in resp.text
+            or "cf-" in resp.text.lower()
+            or cf_ray
+            or cf_mitigated
+        ):
             print(
-                "🚫 تم حظر طلب WordPress REST API بواسطة نظام الحماية "
-                "(Bot Verification)."
+                "🚫 تم رفض طلب WordPress REST API بواسطة طبقة حماية "
+                "أمام الموقع (مثل Cloudflare/WAF)."
             )
             print(
-                "⚠️ يجب السماح لمسارات WordPress REST API من إعدادات "
-                "Cloudflare/WAF/حماية الاستضافة."
+                "⚠️ هذا يعني غالبًا أن الطلب من GitHub Actions يصل إلى "
+                "خادم الحماية قبل أن يصل إلى WordPress."
+            )
+            print(
+                "➡️ راجع إعدادات حماية الموقع للسماح بطلبات REST API "
+                "الشرعية الخاصة بالموقع."
             )
         else:
-            print(f"⚠️ WordPress returned 403 Forbidden: {resp.text[:500]}")
+            print(
+                "⚠️ WordPress returned 403 Forbidden. "
+                "قد تكون المشكلة صلاحيات المستخدم أو إضافة أمنية."
+            )
+
+        print(f"Response: {resp.text[:500]}")
+
     else:
         print(f"Response: {resp.text[:500]}")
 
@@ -67,12 +97,40 @@ def _print_wp_error(resp, action="WordPress"):
 def test_authentication() -> bool:
     """
     Validates WordPress credentials before processing to avoid wasting API quota.
+    كما يتحقق أولًا من إمكانية الوصول إلى REST API نفسه.
     """
     site_url, auth, username = _get_wp_credentials()
 
     headers = HEADERS_GET.copy()
 
     try:
+        # ---------------------------------------------------------
+        # 1) اختبار REST API بدون مصادقة
+        # ---------------------------------------------------------
+        api_check = requests.get(
+            f"{site_url}/wp-json/",
+            headers=headers,
+            timeout=15,
+        )
+
+        if api_check.status_code == 200:
+            print("✅ WordPress REST API متاح.")
+
+        elif api_check.status_code == 403:
+            print(
+                "❌ REST API نفسه محجوب بدون حتى الوصول إلى مرحلة المصادقة."
+            )
+            _print_wp_error(api_check, "WordPress REST API check")
+            return False
+
+        else:
+            print(
+                f"⚠️ فحص REST API أعاد HTTP {api_check.status_code}."
+            )
+
+        # ---------------------------------------------------------
+        # 2) اختبار المصادقة
+        # ---------------------------------------------------------
         resp = requests.get(
             f"{site_url}/wp-json/wp/v2/users/me",
             auth=auth,
@@ -97,6 +155,15 @@ def test_authentication() -> bool:
                 "  2) Typo in credentials.\n"
                 "  3) Username mismatch.\n"
                 "  4) Server/Hosting stripping Authorization header."
+            )
+
+        elif resp.status_code == 403:
+            print(
+                "Possible reasons:\n"
+                "  1) Cloudflare/WAF/hosting security blocked the request.\n"
+                "  2) Security plugin blocked REST API authentication.\n"
+                "  3) The WordPress user lacks the required permissions.\n"
+                "  4) Authorization header is being removed by the server/proxy."
             )
 
         return False
@@ -136,7 +203,10 @@ def _get_category_id(name: str) -> int | None:
                 _category_cache[name] = cat["id"]
                 return cat["id"]
 
-        print(f"⚠️ Category '{name}' not found in WordPress — post will be created without it.")
+        print(
+            f"⚠️ Category '{name}' not found in WordPress — "
+            f"post will be created without it."
+        )
         return None
 
     except Exception as e:
@@ -161,12 +231,23 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
     site_url, auth, _ = _get_wp_credentials()
 
     try:
-        img_resp = requests.get(image_url, headers=HEADERS_IMAGE, timeout=15)
+        img_resp = requests.get(
+            image_url,
+            headers=HEADERS_IMAGE,
+            timeout=15,
+        )
         img_resp.raise_for_status()
-        content_type = img_resp.headers.get("Content-Type", "image/jpeg")
+
+        content_type = img_resp.headers.get(
+            "Content-Type",
+            "image/jpeg"
+        )
 
         if "image" not in content_type:
-            print(f"⚠️ URL does not contain valid image data (Content-Type: {content_type})")
+            print(
+                f"⚠️ URL does not contain valid image data "
+                f"(Content-Type: {content_type})"
+            )
             return None
 
         ext = "jpg"
@@ -210,7 +291,10 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
             )
 
             if not alt_resp.ok:
-                _print_wp_error(alt_resp, "Featured image alt text update")
+                _print_wp_error(
+                    alt_resp,
+                    "Featured image alt text update"
+                )
 
         return media_id
 
@@ -219,12 +303,22 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
         return None
 
 
-def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict | None:
+def create_draft_post(
+    ai_result: dict,
+    source_url: str,
+    image_url: str
+) -> dict | None:
     main_title = ai_result["title"]
     site_url, auth, _ = _get_wp_credentials()
 
-    media_id = upload_featured_image(image_url, alt_text=main_title)
-    category_ids = resolve_category_ids(ai_result.get("categories", []))
+    media_id = upload_featured_image(
+        image_url,
+        alt_text=main_title
+    )
+
+    category_ids = resolve_category_ids(
+        ai_result.get("categories", [])
+    )
 
     post_payload = {
         "title": main_title,
@@ -252,24 +346,52 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
             return None
 
         post_data = resp.json()
-        print(f"✅ Article published successfully: {post_data.get('link', post_data.get('id'))}")
+
+        print(
+            f"✅ Article published successfully: "
+            f"{post_data.get('link', post_data.get('id'))}"
+        )
+
         return post_data
 
     except Exception as e:
         print(f"❌ Failed to create WordPress post: {e}")
+
         if hasattr(e, "response") and e.response is not None:
-            print(f"Error details: {e.response.text[:500]}")
+            print(
+                f"Error details: "
+                f"{e.response.text[:500]}"
+            )
+
         return None
 
 
-def publish_post(title: str, content: str, categories: list = None, image_url: str = None) -> str | None:
+def publish_post(
+    title: str,
+    content: str,
+    categories: list = None,
+    image_url: str = None
+) -> str | None:
     """
-    الدالة التي يتم استدعاؤها من main.py لنشر المقال وإرجاع رابط المنشور عند النجاح.
+    الدالة التي يتم استدعاؤها من main.py لنشر المقال
+    وإرجاع رابط المنشور عند النجاح.
     """
     site_url, auth, _ = _get_wp_credentials()
 
-    media_id = upload_featured_image(image_url, alt_text=title) if image_url else None
-    category_ids = resolve_category_ids(categories) if categories else []
+    media_id = (
+        upload_featured_image(
+            image_url,
+            alt_text=title
+        )
+        if image_url
+        else None
+    )
+
+    category_ids = (
+        resolve_category_ids(categories)
+        if categories
+        else []
+    )
 
     post_payload = {
         "title": title,
@@ -298,11 +420,21 @@ def publish_post(title: str, content: str, categories: list = None, image_url: s
 
         post_data = resp.json()
         post_link = post_data.get("link")
-        print(f"✅ Article published successfully: {post_link or post_data.get('id')}")
+
+        print(
+            f"✅ Article published successfully: "
+            f"{post_link or post_data.get('id')}"
+        )
+
         return post_link
 
     except Exception as e:
         print(f"❌ Failed to create WordPress post: {e}")
+
         if hasattr(e, "response") and e.response is not None:
-            print(f"Error details: {e.response.text[:500]}")
+            print(
+                f"Error details: "
+                f"{e.response.text[:500]}"
+            )
+
         return None
