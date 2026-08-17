@@ -12,7 +12,7 @@ from config import CONFIG
 from rss_fetcher import fetch_prioritized_news
 from article_extractor import extract_article
 from content_ai import process_article
-from wordpress_publisher import publish_post
+from wordpress_publisher import publish_post, test_authentication
 from telegram_reporter import send_cycle_report, send_error_alert
 
 
@@ -47,9 +47,18 @@ def map_category_names_to_ids(category_names: list) -> list:
 
 def run_pipeline():
     print("🚀 بدء دورة جلب ونشر الأخبار الرياضية...")
-    
+
     if hasattr(db, "init_db"):
         db.init_db()
+
+    # التحقق من WordPress قبل بدء معالجة الأخبار
+    if not test_authentication():
+        print("❌ تعذر الوصول إلى WordPress — تم إيقاف الدورة.")
+        send_error_alert(
+            "❌ تعذر الوصول إلى WordPress REST API. "
+            "تحقق من بيانات الدخول أو HTTP 403 / Bot Verification."
+        )
+        return
 
     # 1. جلب قائمة الأخبار غير المكررة
     news_items = fetch_prioritized_news()
