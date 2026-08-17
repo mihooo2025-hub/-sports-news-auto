@@ -14,19 +14,6 @@ import feedparser
 from config import CONFIG
 import db
 
-EXCLUDED_SPORTS_KEYWORDS = [
-    # الرياضات الأخرى المستبعدة
-    "كرة السلة", "السلة", "بطولة السلة", "NBA", "دوري السلة",
-    "التنس", "ويمبلدون", "رولان جاروس", "بطولة التنس",
-    "فورمولا 1", "فورمولا1", "الفورمولا", "F1",
-    "الكريكيت", "الرغبي", "الجولف", "الملاكمة",
-    "السباحة", "ألعاب القوى", "الجمباز",
-    "Basketball", "Baloncesto", "Tennis", "Tenis",
-    "Formula 1", "Fórmula 1", "Cricket", "Rugby", "Golf",
-    "Boxing", "Boxeo", "Swimming", "Natación",
-    "Baseball", "Béisbol", "NFL", "NHL", "MLB",
-]
-
 
 def _is_recent(entry, max_age_hours: int) -> bool:
     published = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -46,10 +33,6 @@ def _clean_title(title: str) -> str:
         if title.endswith(tag):
             title = title[:-len(tag)].strip()
     return title
-
-
-def _is_football_only(title: str) -> bool:
-    return not any(bad_word.lower() in title.lower() for bad_word in EXCLUDED_SPORTS_KEYWORDS)
 
 
 def _fetch_feed_content(url: str) -> bytes:
@@ -86,10 +69,6 @@ def fetch_prioritized_news() -> list:
                 link = entry.get("link", "").strip()
 
                 if not raw_title or not link or link in seen_links:
-                    continue
-
-                # تصفية الرياضات الأخرى غير كرة القدم فوراً
-                if not _is_football_only(raw_title):
                     continue
 
                 # إزالة كلمة كووورة من نهايات العناوين تلقائياً قبل معالجتها
