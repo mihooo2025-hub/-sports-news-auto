@@ -62,17 +62,34 @@ def is_processed(url: str, title: str = "") -> bool:
     """
     تحقق مما إذا كان الخبر قد تم جلبه أو معالجته مسبقاً،
     عبر الرابط أو عبر العنوان.
+
+    الأخبار التي فشل نشرها (publish_failed) لا تعتبر معالجة،
+    وبالتالي يمكن إعادة محاولة نشرها في دورة لاحقة.
     """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    cur.execute("SELECT 1 FROM processed_news WHERE url_hash = ? OR original_url = ?", (_hash_url(url), url))
+    cur.execute(
+        """
+        SELECT 1 FROM processed_news
+        WHERE (url_hash = ? OR original_url = ?)
+        AND status != 'publish_failed'
+        """,
+        (_hash_url(url), url)
+    )
     if cur.fetchone():
         conn.close()
         return True
 
     if title:
-        cur.execute("SELECT 1 FROM processed_news WHERE title_hash = ?", (_hash_title(title),))
+        cur.execute(
+            """
+            SELECT 1 FROM processed_news
+            WHERE title_hash = ?
+            AND status != 'publish_failed'
+            """,
+            (_hash_title(title),)
+        )
         if cur.fetchone():
             conn.close()
             return True
