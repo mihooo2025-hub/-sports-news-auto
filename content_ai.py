@@ -1,8 +1,8 @@
 """
 content_ai.py
 =============
-يرسل نص الخبر الأصلي إلى OpenAI ليقوم بـ:
-1. الفحص النصي الأولي بواسطة بايثون + المراجعة الذكية عبر OpenAI للتأكد من المعنى.
+يرسل نص الخبر الأصلي إلى Google Gemini ليقوم بـ:
+1. الفحص النصي الأولي بواسطة بايثون + المراجعة الذكية عبر Gemini للتأكد من المعنى.
 2. إعادة صياغته بأسلوب صحفي رياضي محترف.
 3. اقتراح عنوان جذاب واختيار التصنيف المناسب.
 """
@@ -11,11 +11,12 @@ import json
 import re
 import os
 from difflib import SequenceMatcher
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from config import CONFIG
 
-client = OpenAI(api_key=CONFIG["openai"]["api_key"])
-MODEL = CONFIG["openai"].get("model", "gpt-4o-mini")
+client = genai.Client(api_key=CONFIG["gemini"]["api_key"])
+MODEL = CONFIG["gemini"].get("model", "gemini-3.6-flash")
 
 BLOCKED_CATEGORIES = {"اهم الاخبار", "مقالات وتحليلات"}
 ALLOWED_CATEGORIES = [c for c in CONFIG["categories"] if c not in BLOCKED_CATEGORIES]
@@ -50,18 +51,19 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
     )
 
     try:
-        response = client.chat.completions.create(
+        response = client.models.generate_content(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.7,
-            response_format={"type": "json_object"},
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+            ),
         )
-        result = json.loads(response.choices[0].message.content)
+
+        result = json.loads(response.text)
+
     except Exception as e:
-        print(f"❌ فشل استدعاء OpenAI أو تحليل الرد: {e}")
+        print(f"❌ فشل استدعاء Google Gemini أو تحليل الرد: {e}")
         return None
 
     result["categories"] = [
