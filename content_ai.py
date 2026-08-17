@@ -64,7 +64,11 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
         print(f"❌ فشل استدعاء OpenAI أو تحليل الرد: {e}")
         return None
 
-    result["categories"] = [c for c in result.get("categories", []) if c in ALLOWED_CATEGORIES]
+    result["categories"] = [
+        c for c in result.get("categories", [])
+        if c in ALLOWED_CATEGORIES
+    ]
+
     if not result["categories"]:
         print("⚠️ لم يتم تحديد تصنيف مناسب للخبر — سيُنشر بلا تصنيف (غير مصنف).")
 
