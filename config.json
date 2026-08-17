@@ -4,9 +4,9 @@
     "username": "PASTE_YOUR_USERNAME_HERE",
     "app_password": "PASTE_YOUR_APP_PASSWORD_HERE"
   },
-  "openai": {
-    "api_key": "PASTE_YOUR_OPENAI_KEY_HERE",
-    "model": "gpt-4o-mini"
+  "gemini": {
+    "api_key": "PASTE_YOUR_GEMINI_KEY_HERE",
+    "model": "gemini-3.6-flash"
   },
   "telegram": {
     "bot_token": "PASTE_YOUR_TELEGRAM_BOT_TOKEN_HERE",
@@ -20,9 +20,9 @@
     "country": "EG"
   },
   "rss_sources": [
-    { 
-      "name": "Kooora (AR)", 
-      "url": "https://news.google.com/rss/search?q=site:kooora.com&hl=ar&gl=EG&ceid=EG:ar" 
+    {
+      "name": "Kooora (AR)",
+      "url": "https://news.google.com/rss/search?q=site:kooora.com&hl=ar&gl=EG&ceid=EG:ar"
     }
   ],
   "blocked_domains": [
