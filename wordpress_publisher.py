@@ -8,25 +8,14 @@ wordpress_publisher.py
 - Creates published post directly with featured image and resolved categories.
 """
 
-import base64
 import requests
 from requests.auth import HTTPBasicAuth
 from config import CONFIG
 
-# ترويسات موحدة وشاملة لمحاكاة متصفح حقيقي بالكامل وتجاوز فحص البوتات (Bot Verification)
+# ترويسات بسيطة ومناسبة لـ WordPress REST API
 DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "news-bot/1.0",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-    "Sec-Ch-Ua": '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
 }
 
 HEADERS_GET = DEFAULT_HEADERS.copy()
@@ -38,7 +27,7 @@ HEADERS_JSON["Content-Type"] = "application/json"
 HEADERS_WP = HEADERS_JSON
 
 HEADERS_IMAGE = {
-    "User-Agent": DEFAULT_HEADERS["User-Agent"],
+    "User-Agent": "news-bot/1.0",
     "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
 }
 
@@ -50,25 +39,38 @@ def _get_wp_credentials():
     site_url = wp.get("site_url", "").rstrip("/")
     username = wp.get("username", "")
     password = wp.get("app_password", "")
-    
+
     auth = HTTPBasicAuth(username, password)
-    
-    # إنشـاء ترويسة Basic Auth يدوياً لتمريرها مع الطلبات لمنع حظرها من جدران الحماية
-    credentials = f"{username}:{password}"
-    encoded_auth = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-    auth_header = {"Authorization": f"Basic {encoded_auth}"}
-    
-    return site_url, auth, username, auth_header
+
+    return site_url, auth, username
+
+
+def _print_wp_error(resp, action="WordPress"):
+    print(f"❌ {action} failed — HTTP {resp.status_code}")
+
+    if resp.status_code == 403:
+        if "Bot Verification" in resp.text:
+            print(
+                "🚫 تم حظر طلب WordPress REST API بواسطة نظام الحماية "
+                "(Bot Verification)."
+            )
+            print(
+                "⚠️ يجب السماح لمسارات WordPress REST API من إعدادات "
+                "Cloudflare/WAF/حماية الاستضافة."
+            )
+        else:
+            print(f"⚠️ WordPress returned 403 Forbidden: {resp.text[:500]}")
+    else:
+        print(f"Response: {resp.text[:500]}")
 
 
 def test_authentication() -> bool:
     """
     Validates WordPress credentials before processing to avoid wasting API quota.
     """
-    site_url, auth, username, auth_header = _get_wp_credentials()
-    
+    site_url, auth, username = _get_wp_credentials()
+
     headers = HEADERS_GET.copy()
-    headers.update(auth_header)
 
     try:
         resp = requests.get(
@@ -77,12 +79,17 @@ def test_authentication() -> bool:
             headers=headers,
             timeout=15,
         )
+
         if resp.status_code == 200:
             user_data = resp.json()
-            print(f"✅ WordPress authentication successful — User: {user_data.get('name', username)}")
+            print(
+                f"✅ WordPress authentication successful — User: "
+                f"{user_data.get('name', username)}"
+            )
             return True
 
-        print(f"❌ WordPress authentication failed (Status code: {resp.status_code}).")
+        _print_wp_error(resp, "WordPress authentication")
+
         if resp.status_code == 401:
             print(
                 "Possible reasons:\n"
@@ -91,8 +98,7 @@ def test_authentication() -> bool:
                 "  3) Username mismatch.\n"
                 "  4) Server/Hosting stripping Authorization header."
             )
-        else:
-            print(f"Details: {resp.text[:300]}")
+
         return False
 
     except Exception as e:
@@ -108,10 +114,9 @@ def _get_category_id(name: str) -> int | None:
     if name in _category_cache:
         return _category_cache[name]
 
-    site_url, auth, _, auth_header = _get_wp_credentials()
+    site_url, auth, _ = _get_wp_credentials()
 
     headers = HEADERS_GET.copy()
-    headers.update(auth_header)
 
     try:
         resp = requests.get(
@@ -121,7 +126,11 @@ def _get_category_id(name: str) -> int | None:
             headers=headers,
             timeout=15,
         )
-        resp.raise_for_status()
+
+        if not resp.ok:
+            _print_wp_error(resp, f"Category search '{name}'")
+            return None
+
         for cat in resp.json():
             if cat["name"].strip() == name.strip():
                 _category_cache[name] = cat["id"]
@@ -149,12 +158,13 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
     if not image_url:
         return None
 
-    site_url, auth, _, auth_header = _get_wp_credentials()
+    site_url, auth, _ = _get_wp_credentials()
 
     try:
         img_resp = requests.get(image_url, headers=HEADERS_IMAGE, timeout=15)
         img_resp.raise_for_status()
         content_type = img_resp.headers.get("Content-Type", "image/jpeg")
+
         if "image" not in content_type:
             print(f"⚠️ URL does not contain valid image data (Content-Type: {content_type})")
             return None
@@ -168,7 +178,6 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
         filename = f"featured-{abs(hash(image_url)) % 10**8}.{ext}"
 
         upload_headers = DEFAULT_HEADERS.copy()
-        upload_headers.update(auth_header)
         upload_headers.update({
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Type": content_type,
@@ -181,20 +190,27 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
             data=img_resp.content,
             timeout=20,
         )
-        upload_resp.raise_for_status()
+
+        if not upload_resp.ok:
+            _print_wp_error(upload_resp, "Featured image upload")
+            return None
+
         media_data = upload_resp.json()
         media_id = media_data["id"]
 
         if alt_text:
             alt_headers = HEADERS_JSON.copy()
-            alt_headers.update(auth_header)
-            requests.post(
+
+            alt_resp = requests.post(
                 f"{site_url}/wp-json/wp/v2/media/{media_id}",
                 auth=auth,
                 json={"alt_text": alt_text},
                 headers=alt_headers,
                 timeout=10,
             )
+
+            if not alt_resp.ok:
+                _print_wp_error(alt_resp, "Featured image alt text update")
 
         return media_id
 
@@ -205,7 +221,7 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
 
 def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict | None:
     main_title = ai_result["title"]
-    site_url, auth, _, auth_header = _get_wp_credentials()
+    site_url, auth, _ = _get_wp_credentials()
 
     media_id = upload_featured_image(image_url, alt_text=main_title)
     category_ids = resolve_category_ids(ai_result.get("categories", []))
@@ -216,11 +232,11 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
         "status": "publish",
         "categories": category_ids,
     }
+
     if media_id:
         post_payload["featured_media"] = media_id
 
     headers = HEADERS_JSON.copy()
-    headers.update(auth_header)
 
     try:
         resp = requests.post(
@@ -230,10 +246,15 @@ def create_draft_post(ai_result: dict, source_url: str, image_url: str) -> dict 
             headers=headers,
             timeout=15,
         )
-        resp.raise_for_status()
+
+        if not resp.ok:
+            _print_wp_error(resp, "Create WordPress post")
+            return None
+
         post_data = resp.json()
         print(f"✅ Article published successfully: {post_data.get('link', post_data.get('id'))}")
         return post_data
+
     except Exception as e:
         print(f"❌ Failed to create WordPress post: {e}")
         if hasattr(e, "response") and e.response is not None:
@@ -245,7 +266,7 @@ def publish_post(title: str, content: str, categories: list = None, image_url: s
     """
     الدالة التي يتم استدعاؤها من main.py لنشر المقال وإرجاع رابط المنشور عند النجاح.
     """
-    site_url, auth, _, auth_header = _get_wp_credentials()
+    site_url, auth, _ = _get_wp_credentials()
 
     media_id = upload_featured_image(image_url, alt_text=title) if image_url else None
     category_ids = resolve_category_ids(categories) if categories else []
@@ -256,11 +277,11 @@ def publish_post(title: str, content: str, categories: list = None, image_url: s
         "status": "publish",
         "categories": category_ids,
     }
+
     if media_id:
         post_payload["featured_media"] = media_id
 
     headers = HEADERS_JSON.copy()
-    headers.update(auth_header)
 
     try:
         resp = requests.post(
@@ -270,11 +291,16 @@ def publish_post(title: str, content: str, categories: list = None, image_url: s
             headers=headers,
             timeout=15,
         )
-        resp.raise_for_status()
+
+        if not resp.ok:
+            _print_wp_error(resp, "Create WordPress post")
+            return None
+
         post_data = resp.json()
         post_link = post_data.get("link")
         print(f"✅ Article published successfully: {post_link or post_data.get('id')}")
         return post_link
+
     except Exception as e:
         print(f"❌ Failed to create WordPress post: {e}")
         if hasattr(e, "response") and e.response is not None:
