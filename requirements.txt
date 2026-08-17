@@ -2,5 +2,5 @@ requests
 beautifulsoup4
 lxml
 feedparser
-openai
+google-genai
 googlenewsdecoder
