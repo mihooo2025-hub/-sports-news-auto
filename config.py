@@ -36,10 +36,11 @@ def load_config() -> dict:
         ("wordpress", "site_url"): "WP_SITE_URL",
         ("wordpress", "username"): "WP_USERNAME",
         ("wordpress", "app_password"): "WP_APP_PASSWORD",
-        ("openai", "api_key"): "OPENAI_API_KEY",
+        ("gemini", "api_key"): "GEMINI_API_KEY",
         ("telegram", "bot_token"): "TELEGRAM_BOT_TOKEN",
         ("telegram", "chat_id"): "TELEGRAM_CHAT_ID",
     }
+
     for (section, key), env_name in env_map.items():
         env_value = os.environ.get(env_name)
         if env_value:
@@ -49,8 +50,9 @@ def load_config() -> dict:
         ("wordpress", "site_url"),
         ("wordpress", "username"),
         ("wordpress", "app_password"),
-        ("openai", "api_key"),
+        ("gemini", "api_key"),
     ]
+
     for section, key in required_paths:
         value = cfg.get(section, {}).get(key, "")
         if not value or "PASTE_YOUR" in value:
