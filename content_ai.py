@@ -10,6 +10,7 @@ content_ai.py
 import json
 import re
 import os
+import time
 from difflib import SequenceMatcher
 from google import genai
 from google.genai import types
@@ -50,21 +51,60 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
         f"نص الخبر الأصلي الكامل:\n{raw_text}"
     )
 
-    try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                response_mime_type="application/json",
-            ),
-        )
+    # إعادة المحاولة تلقائيًا عند أخطاء Gemini المؤقتة مثل 503 و429.
+    max_retries = 3
+    retry_delays = [5, 15, 30]
 
-        result = json.loads(response.text)
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                ),
+            )
 
-    except Exception as e:
-        print(f"❌ فشل استدعاء Google Gemini أو تحليل الرد: {e}")
-        return None
+            result = json.loads(response.text)
+            break
+
+        except Exception as e:
+            error_text = str(e)
+
+            # أخطاء مؤقتة يمكن أن تختفي بعد الانتظار ثم إعادة المحاولة.
+            temporary_errors = (
+                "503",
+                "UNAVAILABLE",
+                "429",
+                "RESOURCE_EXHAUSTED",
+                "500",
+                "INTERNAL",
+                "502",
+                "BAD_GATEWAY",
+                "504",
+                "DEADLINE_EXCEEDED",
+            )
+
+            is_temporary_error = any(
+                error in error_text.upper()
+                for error in temporary_errors
+            )
+
+            if is_temporary_error and attempt < max_retries - 1:
+                wait_time = retry_delays[attempt]
+
+                print(
+                    f"⚠️ تعذر الاتصال بـ Google Gemini مؤقتًا "
+                    f"(المحاولة {attempt + 1}/{max_retries}). "
+                    f"سيتم إعادة المحاولة بعد {wait_time} ثانية..."
+                )
+
+                time.sleep(wait_time)
+                continue
+
+            print(f"❌ فشل استدعاء Google Gemini أو تحليل الرد: {e}")
+            return None
 
     result["categories"] = [
         c for c in result.get("categories", [])
