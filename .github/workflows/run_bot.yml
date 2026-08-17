@@ -1,8 +1,8 @@
-name: نشر أخبار كرة القدم التلقائي (كل ساعة)
+name: نشر أخبار كرة القدم التلقائي (كل نصف ساعة)
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:
