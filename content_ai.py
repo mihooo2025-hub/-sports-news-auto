@@ -78,6 +78,7 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
 
     max_retries = max(3, len(API_KEYS) * 2)
     retry_delays = [5, 15, 30, 45, 60]
+    result = None
 
     for attempt in range(max_retries):
         try:
@@ -135,6 +136,10 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
 
             print(f"❌ فشل استدعاء Google Gemini أو تحليل الرد: {e}")
             return None
+
+    if not result:
+        print("❌ انتهت جميع المحاولات لاستدعاء Gemini بنجاح — سيتم تجاوز الخبر.")
+        return None
 
     result["categories"] = [
         c for c in result.get("categories", [])
