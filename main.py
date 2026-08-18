@@ -1,157 +1,156 @@
 """
-main.py
-=======
-الملف الرئيسي لإدارة دورة جلب الأخبار، معالجتها عبر الذكاء الاصطناعي،
-نشرها في ووردبريس مع الصور البارزة، وإرسال تقارير المتابعة عبر تلجرام.
+content_ai.py
+=============
+يرسل نص الخبر الأصلي إلى Google Gemini ليقوم بـ:
+1. الفحص النصي الأولي بواسطة بايثون + المراجعة الذكية عبر Gemini للتأكد من المعنى.
+2. إعادة صياغته بأسلوب صحفي رياضي محترف.
+3. اقتراح عنوان جذاب واختيار التصنيف المناسب.
 """
 
-import sys
+import json
+import re
+import os
 import time
-import db
+from difflib import SequenceMatcher
+from google import genai
+from google.genai import types
 from config import CONFIG
-from rss_fetcher import fetch_prioritized_news
-from article_extractor import extract_article
-from content_ai import process_article
-from wordpress_publisher import publish_post, test_authentication
-from telegram_reporter import send_cycle_report, send_error_alert
+
+# الإبقاء على النموذج الخاص بك كما هو
+MODEL = CONFIG["gemini"].get("model", "gemini-3.6-flash")
+
+# جلب قائمة مفاتيح API (دعم مفتاح واحد أو عدة مفاتيح مفصولة بفاصلة)
+raw_api_key = CONFIG["gemini"]["api_key"]
+if isinstance(raw_api_key, list):
+    API_KEYS = raw_api_key
+elif isinstance(raw_api_key, str) and "," in raw_api_key:
+    API_KEYS = [k.strip() for k in raw_api_key.split(",") if k.strip()]
+else:
+    API_KEYS = [raw_api_key]
+
+current_key_index = 0
+
+BLOCKED_CATEGORIES = {"اهم الاخبار", "مقالات وتحليلات"}
+ALLOWED_CATEGORIES = [c for c in CONFIG["categories"] if c not in BLOCKED_CATEGORIES]
+
+RULES_FILE = os.path.join(os.path.dirname(__file__), "rules_ar.md")
+
+with open(RULES_FILE, "r", encoding="utf-8") as f:
+    SYSTEM_PROMPT = f.read()
+
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+    "{{ALLOWED_CATEGORIES}}",
+    json.dumps(ALLOWED_CATEGORIES, ensure_ascii=False)
+)
 
 
-def mark_db_record(url: str, title: str, status: str):
-    """دالة مرنة لتسجيل الخبر في قاعدة البيانات بحسب اسم الدالة المتاح في db.py"""
-    if hasattr(db, "mark_as_processed"):
-        db.mark_as_processed(url, title, status)
-    elif hasattr(db, "add_processed_news"):
-        db.add_processed_news(url, title, status)
-    elif hasattr(db, "save_article"):
-        db.save_article(url, title, status)
-    else:
+def get_client():
+    global current_key_index
+    key = API_KEYS[current_key_index]
+    return genai.Client(api_key=key)
+
+
+def switch_to_next_key():
+    global current_key_index
+    if len(API_KEYS) > 1:
+        current_key_index = (current_key_index + 1) % len(API_KEYS)
+        print(f"🔄 تم التبديل إلى مفتاح Gemini API رقم ({current_key_index + 1}/{len(API_KEYS)})")
+        return True
+    return False
+
+
+def is_semantic_duplicate(new_title: str, recent_titles: list[str]) -> bool:
+    """
+    تم الغاء فحص التكرار.
+    """
+    return False
+
+
+def process_article(raw_text: str, source_title: str, matched_keyword: str) -> dict | None:
+    if not raw_text or len(raw_text) < 100:
+        print("⚠️ تم تجاوز المقال — النص الأصلي قصير جدًا أو فارغ (لا يمكن الاعتماد عليه).")
+        return None
+
+    user_prompt = (
+        f"عنوان الخبر كما ورد من المصدر: {source_title}\n"
+        f"الكلمة المفتاحية المرتبطة بالبحث: {matched_keyword}\n\n"
+        f"نص الخبر الأصلي الكامل:\n{raw_text}"
+    )
+
+    # ديناميكية عدد المحاولات بناءً على عدد المفاتيح المتاحة
+    max_retries = max(6, len(API_KEYS) * 3)
+    retry_delays = [10, 20, 30, 45, 60]
+    result = None
+
+    for attempt in range(max_retries):
         try:
-            if hasattr(db, "is_processed"):
-                db.is_processed(url)
-        except Exception:
-            pass
+            client = get_client()
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                ),
+            )
 
+            result = json.loads(response.text)
+            break
 
-def map_category_names_to_ids(category_names: list) -> list:
-    """
-    إعادة التصنيفات المحددة بواسطة الذكاء الاصطناعي.
-    إذا كانت التصنيفات في config قائمة أسماء، نمرر الأسماء المتقاطعة مباشرة لموديول النشر.
-    """
-    configured_categories = CONFIG.get("categories", [])
-    if isinstance(configured_categories, list):
-        # تصفية الأسماء المطابقة فقط الموجودة في config
-        matched = [cat for cat in category_names if cat in configured_categories]
-        return matched if matched else category_names
-    return category_names
+        except Exception as e:
+            error_text = str(e)
 
+            temporary_errors = (
+                "503",
+                "UNAVAILABLE",
+                "429",
+                "RESOURCE_EXHAUSTED",
+                "500",
+                "INTERNAL",
+                "502",
+                "BAD_GATEWAY",
+                "504",
+                "DEADLINE_EXCEEDED",
+            )
 
-def run_pipeline():
-    print("🚀 بدء دورة جلب ونشر الأخبار الرياضية...")
+            is_quota_error = "429" in error_text or "RESOURCE_EXHAUSTED" in error_text.upper()
+            is_temporary_error = any(error in error_text.upper() for error in temporary_errors)
 
-    if hasattr(db, "init_db"):
-        db.init_db()
+            if is_quota_error:
+                switched = switch_to_next_key()
+                if switched:
+                    time.sleep(8)  # إعطاء مهلة مناسبة للمفتاح الجديد قبل الطلب
+                    continue
 
-    # التحقق من WordPress قبل بدء معالجة الأخبار
-    if not test_authentication():
-        print("❌ تعذر الوصول إلى WordPress — تم إيقاف الدورة.")
-        send_error_alert(
-            "❌ تعذر الوصول إلى WordPress REST API. "
-            "تحقق من بيانات الدخول أو HTTP 403 / Bot Verification."
-        )
-        return
+            if is_temporary_error and attempt < max_retries - 1:
+                wait_time = retry_delays[min(attempt, len(retry_delays) - 1)]
 
-    # 1. جلب قائمة الأخبار غير المكررة
-    news_items = fetch_prioritized_news()
-    checked_count = len(news_items)
+                print(
+                    f"⚠️ تعذر الاتصال بـ Google Gemini مؤقتًا "
+                    f"(المحاولة {attempt + 1}/{max_retries}). "
+                    f"سيتم إعادة المحاولة بعد {wait_time} ثانية..."
+                )
 
-    if not news_items:
-        print("ℹ️ لم يتم العثور على أخبار جديدة في هذه الدورة.")
-        send_cycle_report([], 0, 0)
-        return
+                time.sleep(wait_time)
+                continue
 
-    print(f"🔍 تم العثور على {checked_count} خبر جديد للبدء في المعالجة...")
+            print(f"❌ فشل استدعاء Google Gemini أو تحليل الرد: {e}")
+            return None
 
-    published_items = []
-    skipped_count = 0
+    if not result:
+        print("❌ انتهت جميع المحاولات لاستدعاء Gemini بنجاح — سيتم تجاوز الخبر وإعادة محاولته في الدورة القادمة.")
+        return None
 
-    for idx, item in enumerate(news_items, start=1):
-        source_title = item.get("title", "")
-        source_link = item.get("link", "")
-        matched_keyword = item.get("matched_keyword", "")
+    result["categories"] = [
+        c for c in result.get("categories", [])
+        if c in ALLOWED_CATEGORIES
+    ]
 
-        print(f"\n[{idx}/{checked_count}] جاري معالجة الخبر: {source_title}")
+    if not result["categories"]:
+        print("⚠️ لم يتم تحديد تصنيف مناسب للخبر — سيُنشر بلا تصنيف (غير مصنف).")
 
-        # 2. استخراج المقال ورابطه الأصلي والصورة
-        extracted_data = extract_article(source_link)
+    if not result.get("title"):
+        print("⚠️ لم يتم توليد عنوان — سيتم تجاوز المقال.")
+        return None
 
-        if extracted_data.get("blocked"):
-            print("🚫 تجاوز الخبر لأنه ينتمي لنطاق ممنوع.")
-            mark_db_record(source_link, source_title, "skipped_blocked_domain")
-            skipped_count += 1
-            continue
-
-        raw_content = extracted_data.get("text", "")
-        image_url = extracted_data.get("image_url") or extracted_data.get("image") or item.get("image_url")
-        resolved_url = extracted_data.get("resolved_url") or source_link
-
-        if not extracted_data.get("success") or not raw_content:
-            print("⚠️ تعذر جلب محتوى المقال أو المحتوى قصير جدًا — سيتم التجاوز.")
-            mark_db_record(source_link, source_title, "skipped_no_content")
-            skipped_count += 1
-            continue
-
-        # 3. إعادة الصياغة وإنشاء العنوان والتصنيفات بواسطة الذكاء الاصطناعي
-        ai_result = process_article(raw_content, source_title, matched_keyword)
-
-        # تأخير 5 ثوانٍ بعد كل طلب للذكاء الاصطناعي لمنع تجاوز حد الاستخدام
-        time.sleep(5)
-
-        if not ai_result:
-            print("⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي — سيتم التجاوز وإعادة محاولته في الدورة القادمة.")
-            skipped_count += 1
-            continue
-
-        rewritten_title = ai_result["title"]
-        rewritten_content = ai_result["rewritten_content"]
-        category_names = ai_result.get("categories", [])
-
-        # 4. مطابقة التصنيفات
-        categories_to_publish = map_category_names_to_ids(category_names)
-
-        # 5. نشر المقال في ووردبريس مع رفع الصورة البارزة
-        site_url = publish_post(
-            title=rewritten_title,
-            content=rewritten_content,
-            categories=categories_to_publish,
-            image_url=image_url
-        )
-
-        # تأخير ثانيتين بعد كل عملية نشر في ووردبريس لمزيد من الدقة وتجنب الأخطاء
-        time.sleep(2)
-
-        if site_url:
-            print(f"✅ تم النشر بنجاح مع الصورة: {site_url}")
-            mark_db_record(source_link, rewritten_title, "published")
-            published_items.append({
-                "title": rewritten_title,
-                "source_url": resolved_url,
-                "site_url": site_url,
-            })
-        else:
-            print("❌ فشل النشر في ووردبريس.")
-            mark_db_record(source_link, source_title, "publish_failed")
-            skipped_count += 1
-
-    # 6. إرسال تقرير الدورة إلى تلجرام
-    send_cycle_report(published_items, checked_count, skipped_count)
-    print("\n🎉 اكتملت الدورة بنجاح.")
-
-
-if __name__ == "__main__":
-    try:
-        run_pipeline()
-    except Exception as e:
-        error_msg = f"حدث خطأ غير متوقع أثناء تنفيذ الدورة: {e}"
-        print(f"💥 {error_msg}")
-        send_error_alert(error_msg)
-        sys.exit(1)
+    return result
