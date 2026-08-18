@@ -216,11 +216,22 @@ def _get_category_id(name: str) -> int | None:
 
 
 def resolve_category_ids(category_names: list) -> list:
+    # Uncategorized يجب أن يكون موجودًا دائمًا،
+    # مع الاحتفاظ بباقي التصنيفات التي يحددها النظام.
+    category_names = category_names or []
+
+    if not any(
+        str(name).strip().lower() == "uncategorized"
+        for name in category_names
+    ):
+        category_names = ["Uncategorized"] + list(category_names)
+
     ids = []
     for name in category_names:
         cat_id = _get_category_id(name)
         if cat_id:
             ids.append(cat_id)
+
     return ids
 
 
@@ -387,11 +398,7 @@ def publish_post(
         else None
     )
 
-    category_ids = (
-        resolve_category_ids(categories)
-        if categories
-        else []
-    )
+    category_ids = resolve_category_ids(categories)
 
     post_payload = {
         "title": title,
