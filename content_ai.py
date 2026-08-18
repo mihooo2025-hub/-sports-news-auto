@@ -16,8 +16,18 @@ from google import genai
 from google.genai import types
 from config import CONFIG
 
-client = genai.Client(api_key=CONFIG["gemini"]["api_key"])
 MODEL = CONFIG["gemini"].get("model", "gemini-3.6-flash")
+
+# جلب قائمة مفاتيح API (سواء مفتاح واحد أو عدة مفاتيح مفصولة بفاصلة)
+raw_api_key = CONFIG["gemini"]["api_key"]
+if isinstance(raw_api_key, list):
+    API_KEYS = raw_api_key
+elif isinstance(raw_api_key, str) and "," in raw_api_key:
+    API_KEYS = [k.strip() for k in raw_api_key.split(",") if k.strip()]
+else:
+    API_KEYS = [raw_api_key]
+
+current_key_index = 0
 
 BLOCKED_CATEGORIES = {"اهم الاخبار", "مقالات وتحليلات"}
 ALLOWED_CATEGORIES = [c for c in CONFIG["categories"] if c not in BLOCKED_CATEGORIES]
@@ -31,6 +41,21 @@ SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
     "{{ALLOWED_CATEGORIES}}",
     json.dumps(ALLOWED_CATEGORIES, ensure_ascii=False)
 )
+
+
+def get_client():
+    global current_key_index
+    key = API_KEYS[current_key_index]
+    return genai.Client(api_key=key)
+
+
+def switch_to_next_key():
+    global current_key_index
+    if len(API_KEYS) > 1:
+        current_key_index = (current_key_index + 1) % len(API_KEYS)
+        print(f"🔄 تم التبديل إلى مفتاح Gemini API رقم ({current_key_index + 1}/{len(API_KEYS)})")
+        return True
+    return False
 
 
 def is_semantic_duplicate(new_title: str, recent_titles: list[str]) -> bool:
@@ -51,12 +76,12 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
         f"نص الخبر الأصلي الكامل:\n{raw_text}"
     )
 
-    # إعادة المحاولة تلقائيًا عند أخطاء Gemini المؤقتة مثل 503 و429.
-    max_retries = 3
-    retry_delays = [5, 15, 30]
+    max_retries = max(3, len(API_KEYS) * 2)
+    retry_delays = [5, 15, 30, 45, 60]
 
     for attempt in range(max_retries):
         try:
+            client = get_client()
             response = client.models.generate_content(
                 model=MODEL,
                 contents=user_prompt,
@@ -72,7 +97,7 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
         except Exception as e:
             error_text = str(e)
 
-            # أخطاء مؤقتة يمكن أن تختفي بعد الانتظار ثم إعادة المحاولة.
+            # أخطاء مؤقتة أو استنفاد الحصة
             temporary_errors = (
                 "503",
                 "UNAVAILABLE",
@@ -86,13 +111,18 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
                 "DEADLINE_EXCEEDED",
             )
 
-            is_temporary_error = any(
-                error in error_text.upper()
-                for error in temporary_errors
-            )
+            is_quota_error = "429" in error_text or "RESOURCE_EXHAUSTED" in error_text.upper()
+            is_temporary_error = any(error in error_text.upper() for error in temporary_errors)
+
+            if is_quota_error:
+                # التبديل للمفتاح الاحتياطي عند استنفاد الحصة
+                switched = switch_to_next_key()
+                if switched:
+                    time.sleep(2)
+                    continue
 
             if is_temporary_error and attempt < max_retries - 1:
-                wait_time = retry_delays[attempt]
+                wait_time = retry_delays[min(attempt, len(retry_delays) - 1)]
 
                 print(
                     f"⚠️ تعذر الاتصال بـ Google Gemini مؤقتًا "
