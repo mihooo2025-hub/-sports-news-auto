@@ -18,7 +18,7 @@ from config import CONFIG
 
 MODEL = CONFIG["gemini"].get("model", "gemini-3.6-flash")
 
-# جلب قائمة مفاتيح API (سواء مفتاح واحد أو عدة مفاتيح مفصولة بفاصلة)
+# جلب قائمة مفاتيح API (مفتاحين مفصولين بفاصلة)
 raw_api_key = CONFIG["gemini"]["api_key"]
 if isinstance(raw_api_key, list):
     API_KEYS = raw_api_key
@@ -76,8 +76,9 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
         f"نص الخبر الأصلي الكامل:\n{raw_text}"
     )
 
-    max_retries = max(3, len(API_KEYS) * 2)
-    retry_delays = [5, 15, 30, 45, 60]
+    # ضبط عدد المحاولات خصيصاً لمفتاحين (6 محاولات تضمن التناوب الكافي)
+    max_retries = max(6, len(API_KEYS) * 3)
+    retry_delays = [8, 15, 25, 40, 60]
     result = None
 
     for attempt in range(max_retries):
@@ -98,7 +99,6 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
         except Exception as e:
             error_text = str(e)
 
-            # أخطاء مؤقتة أو استنفاد الحصة
             temporary_errors = (
                 "503",
                 "UNAVAILABLE",
@@ -116,10 +116,10 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
             is_temporary_error = any(error in error_text.upper() for error in temporary_errors)
 
             if is_quota_error:
-                # التبديل للمفتاح الاحتياطي عند استنفاد الحصة
                 switched = switch_to_next_key()
                 if switched:
-                    time.sleep(2)
+                    # مهلة مناسبة لمنح المفتاح البديل فرصة للتجاوب عند الضغط
+                    time.sleep(8)
                     continue
 
             if is_temporary_error and attempt < max_retries - 1:
@@ -138,7 +138,7 @@ def process_article(raw_text: str, source_title: str, matched_keyword: str) -> d
             return None
 
     if not result:
-        print("❌ انتهت جميع المحاولات لاستدعاء Gemini بنجاح — سيتم تجاوز الخبر.")
+        print("❌ انتهت جميع المحاولات لاستدعاء Gemini بنجاح — سيتم تجاوز الخبر وإعادة محاولته في الدورة القادمة.")
         return None
 
     result["categories"] = [
