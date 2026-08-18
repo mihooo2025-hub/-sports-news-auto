@@ -5,7 +5,7 @@
     "app_password": "PASTE_YOUR_APP_PASSWORD_HERE"
   },
   "gemini": {
-    "api_key": "PASTE_YOUR_GEMINI_KEY_HERE",
+    "api_key": "PASTE_YOUR_FIRST_GEMINI_KEY_HERE,PASTE_YOUR_SECOND_GEMINI_KEY_HERE",
     "model": "gemini-3.6-flash"
   },
   "telegram": {
