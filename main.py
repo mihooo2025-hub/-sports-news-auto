@@ -107,8 +107,8 @@ def run_pipeline():
         time.sleep(10)
 
         if not ai_result:
-            print("⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي — سيتم التجاوز.")
-            mark_db_record(source_link, source_title, "skipped_ai_error")
+            print("⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي — سيتم التجاوز وإعادة محاولته في الدورة القادمة.")
+            # تم حذف التسجيل في قاعدة البيانات هنا لإعطاء الخبر فرصة ثانية في الدورات القادمة
             skipped_count += 1
             continue
 
