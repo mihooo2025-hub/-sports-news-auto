@@ -11,6 +11,7 @@ content_ai.py
 - عند فشل المفتاح الحالي يتم الانتقال مباشرة إلى المفتاح التالي.
 - لا توجد فترات انتظار طويلة بين المحاولات.
 - إذا فشلت جميع المفاتيح، يتم تجاوز الخبر ليعاد في الدورة التالية.
+- عند نفاد حصة Gemini بالكامل يتم إيقاف المحاولات لبقية الدورة.
 """
 
 import json
@@ -52,6 +53,10 @@ else:
 
 
 current_key_index = 0
+
+# يتم تفعيل هذا المتغير عند التأكد من نفاد حصة Gemini.
+# يبقى فعالًا طوال تشغيل الدورة الحالية فقط.
+gemini_quota_exhausted = False
 
 
 # ==========================================================
@@ -145,6 +150,33 @@ def switch_to_next_key():
 
 
 # ==========================================================
+# التحقق من نفاد الحصة
+# ==========================================================
+
+def is_quota_exhausted_error(error_text: str) -> bool:
+    """
+    التحقق مما إذا كان الخطأ ناتجًا عن نفاد حصة Gemini.
+
+    عند ظهور RESOURCE_EXHAUSTED مع رسائل quota exceeded
+    لا فائدة من الاستمرار في إرسال طلبات جديدة خلال الدورة نفسها.
+    """
+
+    error_text = error_text.upper()
+
+    quota_indicators = (
+        "RESOURCE_EXHAUSTED",
+        "QUOTA EXCEEDED",
+        "GENERATEREQUESTSPERDAYPERPROJECTPERMODEL",
+        "EXCEEDED YOUR CURRENT QUOTA",
+    )
+
+    return any(
+        indicator in error_text
+        for indicator in quota_indicators
+    )
+
+
+# ==========================================================
 # فحص التكرار الدلالي
 # ==========================================================
 
@@ -168,6 +200,18 @@ def process_article(
     source_title: str,
     matched_keyword: str,
 ) -> dict | None:
+
+    global gemini_quota_exhausted
+
+    # إذا تم التأكد مسبقًا من نفاد الحصة،
+    # لا نرسل أي طلب جديد إلى Gemini.
+    if gemini_quota_exhausted:
+        print(
+            "⛔ تم إيقاف معالجة Gemini لهذه الدورة "
+            "بسبب نفاد حصة API."
+        )
+
+        return None
 
     if not raw_text or len(raw_text) < 100:
         print(
@@ -232,6 +276,23 @@ def process_article(
                 f"⚠️ فشل استدعاء Gemini "
                 f"({attempt + 1}/{max_attempts}): {e}"
             )
+
+            # نفاد الحصة ليس خطأً عاديًا خاصًا بهذا الخبر.
+            # نوقف جميع محاولات Gemini لبقية الدورة الحالية.
+            if is_quota_exhausted_error(error_text):
+                gemini_quota_exhausted = True
+
+                print(
+                    "⛔ تم اكتشاف نفاد حصة Gemini API "
+                    "لهذا المشروع/النموذج."
+                )
+
+                print(
+                    "⏹️ سيتم إيقاف محاولات Gemini لبقية "
+                    "الدورة الحالية لتجنب تكرار أخطاء 429."
+                )
+
+                return None
 
             # إذا كان هناك مفتاح آخر،
             # ننتقل إليه فورًا بدون انتظار.
