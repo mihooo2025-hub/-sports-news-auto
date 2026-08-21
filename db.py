@@ -11,8 +11,8 @@ db.py
 أخبار مختلفة متشابهة على أنها خبر واحد.
 
 الأخبار التي تفشل في المعالجة بحالة publish_failed
-يمكن إعادة محاولتها لمدة أقصاها 3 ساعات من وقت أول فشل.
-بعد مرور 3 ساعات يتم تجاهل الخبر نهائيًا.
+يمكن إعادة محاولتها لمدة أقصاها 6 ساعات من وقت أول فشل.
+بعد مرور 6 ساعات يتم تجاهل الخبر نهائيًا.
 """
 
 import hashlib
@@ -28,7 +28,7 @@ DB_PATH = os.path.join(
     "news.db",
 )
 
-FAILED_RETRY_HOURS = 3
+FAILED_RETRY_HOURS = 6
 
 
 def init_db():
@@ -70,24 +70,11 @@ def init_db():
 
 
 def _normalize_url(url: str) -> str:
-    """
-    تنظيف بسيط للرابط فقط.
-
-    يتم تجاهل:
-    - www
-    - query parameters
-    - fragments
-    - slash في نهاية الرابط
-
-    ولا يتم تغيير مسار الخبر نفسه.
-    """
-
     if not url:
         return ""
 
     try:
         parts = urlsplit(url.strip())
-
         host = (parts.hostname or "").lower()
 
         if host.startswith("www."):
@@ -110,17 +97,6 @@ def _normalize_url(url: str) -> str:
 
 
 def _normalize_title(title: str) -> str:
-    """
-    تنظيف محافظ جدًا للعنوان.
-
-    فقط:
-    - إزالة اسم كووورة من نهاية العنوان.
-    - توحيد المسافات.
-    - تحويل الأحرف الإنجليزية إلى lowercase.
-
-    لا يتم استخدام تشابه تقريبي للعناوين.
-    """
-
     if not title:
         return ""
 
@@ -160,7 +136,7 @@ def _failed_retry_expired(created_at: str) -> bool:
     """
     التحقق من انتهاء مدة إعادة محاولة الخبر الفاشل.
 
-    إذا مر أكثر من 3 ساعات على وقت تسجيل الفشل،
+    إذا مر أكثر من 6 ساعات على وقت تسجيل الفشل،
     يتم تجاهل الخبر نهائيًا.
     """
 
@@ -185,8 +161,6 @@ def _failed_retry_expired(created_at: str) -> bool:
         )
 
     except Exception:
-        # إذا تعذر قراءة التاريخ، لا نمنع إعادة المحاولة
-        # حتى لا يتم فقد الخبر بالخطأ.
         return False
 
 
@@ -196,8 +170,8 @@ def _is_matching_record_processed(row) -> bool:
 
     الحالات:
     - أي حالة ليست publish_failed = الخبر تمت معالجته بالفعل.
-    - publish_failed خلال آخر 3 ساعات = يسمح بإعادة المحاولة.
-    - publish_failed بعد 3 ساعات = يتم تجاهله نهائيًا.
+    - publish_failed خلال آخر 6 ساعات = يسمح بإعادة المحاولة.
+    - publish_failed بعد 6 ساعات = يتم تجاهله نهائيًا.
     """
 
     if not row:
@@ -211,7 +185,6 @@ def _is_matching_record_processed(row) -> bool:
     if _failed_retry_expired(created_at):
         return True
 
-    # ما زال داخل نافذة إعادة المحاولة.
     return False
 
 
@@ -222,22 +195,13 @@ def is_processed(
     """
     التحقق من وجود الخبر سابقًا.
 
-    يمنع التكرار إذا:
-    - الرابط نفسه بعد التنظيف.
-    أو
-    - العنوان مطابق 100% بعد التنظيف المحافظ.
-
     الأخبار التي فشلت في المعالجة:
-    - يعاد فحصها ومحاولة معالجتها خلال أول 3 ساعات.
-    - بعد مرور 3 ساعات على الفشل يتم تجاهلها نهائيًا.
+    - يعاد فحصها ومحاولة معالجتها خلال أول 6 ساعات.
+    - بعد مرور 6 ساعات على الفشل يتم تجاهلها نهائيًا.
     """
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-
-    # ==========================================
-    # أولًا: مطابقة الرابط
-    # ==========================================
 
     cur.execute(
         """
@@ -254,10 +218,6 @@ def is_processed(
     if row and _is_matching_record_processed(row):
         conn.close()
         return True
-
-    # ==========================================
-    # ثانياً: مطابقة العنوان 100%
-    # ==========================================
 
     if title:
         cur.execute(
@@ -311,20 +271,6 @@ def mark_processed(
     wp_post_id: int = None,
     status: str = "published",
 ):
-    """
-    تسجيل أو تحديث حالة الخبر في قاعدة البيانات.
-
-    إذا كان الخبر موجودًا مسبقًا بحالة publish_failed،
-    يتم تحديث نفس السجل بدل إنشاء سجل جديد.
-
-    هذا يسمح للخبر بالانتقال من:
-        publish_failed
-    إلى:
-        published
-
-    عند نجاح المحاولة اللاحقة.
-    """
-
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
