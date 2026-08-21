@@ -8,42 +8,84 @@ on:
 permissions:
   contents: write
 
+# منع تشغيل أكثر من دورة في نفس الوقت.
+# إذا بدأت دورة جديدة بينما توجد دورة جارية:
+# لا يتم إلغاء الدورة الجارية.
+# يتم انتظارها بدل تشغيل دورتين معًا.
+concurrency:
+  group: run-news-bot
+  cancel-in-progress: false
+
 jobs:
   run-news-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
+    # السماح للدورة بالعمل حتى ساعتين.
+    # السبب: يتم فحص أخبار آخر 5 ساعات وقد يصل عدد الأخبار
+    # إلى عشرات الأخبار، وكل خبر يحتاج معالجة منفصلة.
+    timeout-minutes: 120
 
     steps:
+
+      # ----------------------------------------
+      # 1. تنزيل نسخة المستودع
+      # ----------------------------------------
+
       - name: تنزيل نسخة المستودع
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ----------------------------------------
+      # 2. إعداد بايثون
+      # ----------------------------------------
 
       - name: إعداد بايثون
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # ----------------------------------------
+      # 3. تثبيت المكتبات
+      # ----------------------------------------
+
       - name: تثبيت المكتبات المطلوبة
         run: pip install -r requirements.txt
+
+      # ----------------------------------------
+      # 4. تشغيل السكربت
+      # ----------------------------------------
 
       - name: تشغيل السكربت
         env:
           WP_SITE_URL: ${{ secrets.WP_SITE_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
         run: python main.py
 
+      # ----------------------------------------
+      # 5. حفظ قاعدة بيانات منع التكرار
+      # ----------------------------------------
+
       - name: حفظ قاعدة بيانات منع التكرار (news.db) داخل المستودع
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
           git add news.db
-          if git commit -m "تحديث news.db [skip ci]"; then
-            git push origin HEAD:${{ github.ref }}
-          else
+
+          if git diff --cached --quiet; then
             echo "لا يوجد تغييرات جديدة في قاعدة البيانات."
+            exit 0
           fi
+
+          git commit -m "تحديث news.db [skip ci]"
+
+          git push origin HEAD:${{ github.ref_name }}
