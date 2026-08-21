@@ -10,15 +10,16 @@ db.py
 لا يتم إجراء تطبيع قوي للعناوين حتى لا يتم اعتبار
 أخبار مختلفة متشابهة على أنها خبر واحد.
 
-الأخبار التي تفشل في النشر بحالة publish_failed
-يمكن إعادة محاولتها.
+الأخبار التي تفشل في المعالجة بحالة publish_failed
+يمكن إعادة محاولتها لمدة أقصاها 5 ساعات من وقت أول فشل.
+بعد مرور 5 ساعات يتم تجاهل الخبر نهائيًا.
 """
 
 import hashlib
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -26,6 +27,8 @@ DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "news.db",
 )
+
+FAILED_RETRY_HOURS = 5
 
 
 def init_db():
@@ -110,16 +113,12 @@ def _normalize_title(title: str) -> str:
     """
     تنظيف محافظ جدًا للعنوان.
 
-    الهدف هو منع التكرار فقط عند تطابق العنوان
-    بشكل كامل بعد تنظيف بسيط.
-
-    لا يتم استخدام تشابه تقريبي بين العناوين،
-    ولا يتم حذف كلمات أو إعادة ترتيبها.
-
     فقط:
     - إزالة اسم كووورة من نهاية العنوان.
     - توحيد المسافات.
     - تحويل الأحرف الإنجليزية إلى lowercase.
+
+    لا يتم استخدام تشابه تقريبي للعناوين.
     """
 
     if not title:
@@ -157,6 +156,65 @@ def _hash_title(title: str) -> str:
     ).hexdigest()
 
 
+def _failed_retry_expired(created_at: str) -> bool:
+    """
+    التحقق من انتهاء مدة إعادة محاولة الخبر الفاشل.
+
+    إذا مر أكثر من 5 ساعات على وقت تسجيل الفشل،
+    يتم تجاهل الخبر نهائيًا.
+    """
+
+    if not created_at:
+        return False
+
+    try:
+        failed_at = datetime.fromisoformat(
+            created_at
+        )
+
+        if failed_at.tzinfo is None:
+            failed_at = failed_at.replace(
+                tzinfo=timezone.utc
+            )
+
+        now = datetime.now(timezone.utc)
+
+        return (
+            now - failed_at
+            >= timedelta(hours=FAILED_RETRY_HOURS)
+        )
+
+    except Exception:
+        # إذا تعذر قراءة التاريخ، لا نمنع إعادة المحاولة
+        # حتى لا يتم فقد الخبر بالخطأ.
+        return False
+
+
+def _is_matching_record_processed(row) -> bool:
+    """
+    تحديد ما إذا كان سجل الخبر يجب اعتباره مكتملًا.
+
+    الحالات:
+    - أي حالة ليست publish_failed = الخبر تمت معالجته بالفعل.
+    - publish_failed خلال آخر 5 ساعات = يسمح بإعادة المحاولة.
+    - publish_failed بعد 5 ساعات = يتم تجاهله نهائيًا.
+    """
+
+    if not row:
+        return False
+
+    status, created_at = row
+
+    if status != "publish_failed":
+        return True
+
+    if _failed_retry_expired(created_at):
+        return True
+
+    # ما زال داخل نافذة إعادة المحاولة.
+    return False
+
+
 def is_processed(
     url: str,
     title: str = "",
@@ -164,50 +222,57 @@ def is_processed(
     """
     التحقق من وجود الخبر سابقًا.
 
-    يمنع التكرار فقط إذا:
-    - الرابط نفسه بعد تنظيف بسيط.
+    يمنع التكرار إذا:
+    - الرابط نفسه بعد التنظيف.
     أو
     - العنوان مطابق 100% بعد التنظيف المحافظ.
 
-    لا يوجد تشابه تقريبي للعناوين حتى لا يتم إسقاط
-    أخبار مختلفة.
-
-    publish_failed لا يمنع إعادة المحاولة.
+    الأخبار التي فشلت في المعالجة:
+    - يعاد فحصها ومحاولة معالجتها خلال أول 5 ساعات.
+    - بعد مرور 5 ساعات على الفشل يتم تجاهلها نهائيًا.
     """
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # أولًا: مطابقة الرابط.
+    # ==========================================
+    # أولًا: مطابقة الرابط
+    # ==========================================
+
     cur.execute(
         """
-        SELECT 1
+        SELECT status, created_at
         FROM processed_news
         WHERE url_hash = ?
-        AND status != 'publish_failed'
         LIMIT 1
         """,
         (_hash_url(url),),
     )
 
-    if cur.fetchone():
+    row = cur.fetchone()
+
+    if row and _is_matching_record_processed(row):
         conn.close()
         return True
 
-    # ثانيًا: مطابقة العنوان 100% بعد التنظيف المحافظ.
+    # ==========================================
+    # ثانيًا: مطابقة العنوان 100%
+    # ==========================================
+
     if title:
         cur.execute(
             """
-            SELECT 1
+            SELECT status, created_at
             FROM processed_news
             WHERE title_hash = ?
-            AND status != 'publish_failed'
             LIMIT 1
             """,
             (_hash_title(title),),
         )
 
-        if cur.fetchone():
+        row = cur.fetchone()
+
+        if row and _is_matching_record_processed(row):
             conn.close()
             return True
 
@@ -247,38 +312,88 @@ def mark_processed(
     status: str = "published",
 ):
     """
-    تسجيل الخبر في قاعدة البيانات.
+    تسجيل أو تحديث حالة الخبر في قاعدة البيانات.
+
+    إذا كان الخبر موجودًا مسبقًا بحالة publish_failed،
+    يتم تحديث نفس السجل بدل إنشاء سجل جديد.
+
+    هذا يسمح للخبر بالانتقال من:
+        publish_failed
+    إلى:
+        published
+
+    عند نجاح المحاولة اللاحقة.
     """
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     normalized_url = _normalize_url(url)
+    url_hash = _hash_url(normalized_url)
+    title_hash = _hash_title(title)
+    created_at = datetime.now(timezone.utc).isoformat()
 
     try:
         cur.execute(
             """
-            INSERT INTO processed_news (
-                url_hash,
-                original_url,
-                title,
-                title_hash,
-                wp_post_id,
-                status,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            SELECT id
+            FROM processed_news
+            WHERE url_hash = ?
+            LIMIT 1
             """,
-            (
-                _hash_url(normalized_url),
-                normalized_url,
-                title,
-                _hash_title(title),
-                wp_post_id,
-                status,
-                datetime.utcnow().isoformat(),
-            ),
+            (url_hash,),
         )
+
+        existing = cur.fetchone()
+
+        if existing:
+            cur.execute(
+                """
+                UPDATE processed_news
+                SET
+                    original_url = ?,
+                    title = ?,
+                    title_hash = ?,
+                    wp_post_id = ?,
+                    status = ?,
+                    created_at = ?
+                WHERE id = ?
+                """,
+                (
+                    normalized_url,
+                    title,
+                    title_hash,
+                    wp_post_id,
+                    status,
+                    created_at,
+                    existing[0],
+                ),
+            )
+
+        else:
+            cur.execute(
+                """
+                INSERT INTO processed_news (
+                    url_hash,
+                    original_url,
+                    title,
+                    title_hash,
+                    wp_post_id,
+                    status,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    url_hash,
+                    normalized_url,
+                    title,
+                    title_hash,
+                    wp_post_id,
+                    status,
+                    created_at,
+                ),
+            )
 
         conn.commit()
 
