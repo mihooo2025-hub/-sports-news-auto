@@ -98,6 +98,11 @@ def run_pipeline():
     published_items = []
     skipped_count = 0
 
+    failed_extraction = 0
+    failed_ai = 0
+    failed_publish = 0
+    blocked_domain = 0
+
     for idx, item in enumerate(news_items, start=1):
 
         source_title = item.get("title", "")
@@ -128,6 +133,7 @@ def run_pipeline():
                 "publish_failed",
             )
 
+            failed_extraction += 1
             skipped_count += 1
             continue
 
@@ -142,6 +148,7 @@ def run_pipeline():
                 "skipped_blocked_domain",
             )
 
+            blocked_domain += 1
             skipped_count += 1
             continue
 
@@ -174,6 +181,7 @@ def run_pipeline():
                 "publish_failed",
             )
 
+            failed_extraction += 1
             skipped_count += 1
             continue
 
@@ -200,6 +208,7 @@ def run_pipeline():
                 "publish_failed",
             )
 
+            failed_ai += 1
             skipped_count += 1
             continue
 
@@ -221,6 +230,7 @@ def run_pipeline():
                 "publish_failed",
             )
 
+            failed_ai += 1
             skipped_count += 1
             continue
 
@@ -255,6 +265,7 @@ def run_pipeline():
                 "publish_failed",
             )
 
+            failed_ai += 1
             skipped_count += 1
             continue
 
@@ -286,6 +297,7 @@ def run_pipeline():
                 "publish_failed",
             )
 
+            failed_publish += 1
             skipped_count += 1
             continue
 
@@ -326,7 +338,17 @@ def run_pipeline():
                 "publish_failed",
             )
 
+            failed_publish += 1
             skipped_count += 1
+
+    print("\n📊 تفاصيل نتائج الدورة:")
+    print(f"✅ نُشر بنجاح: {len(published_items)}")
+    print(f"⚠️ فشل استخراج المقال: {failed_extraction}")
+    print(f"🤖 فشل معالجة الذكاء الاصطناعي: {failed_ai}")
+    print(f"❌ فشل النشر في WordPress: {failed_publish}")
+    print(f"🚫 نطاقات ممنوعة: {blocked_domain}")
+    print(f"🔍 إجمالي الأخبار المفحوصة: {checked_count}")
+    print(f"❌ إجمالي الفشل/التجاوز: {skipped_count}")
 
     send_cycle_report(
         published_items,
