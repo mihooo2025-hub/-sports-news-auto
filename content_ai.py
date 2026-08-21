@@ -104,6 +104,17 @@ SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
 gemini_quota_exhausted = False
 
 
+def is_gemini_quota_exhausted() -> bool:
+    """
+    إرجاع حالة نفاد حصة Gemini الحالية.
+
+    تستخدمها main.py لمعرفة ما إذا كان يجب
+    إيقاف بقية دورة الأخبار.
+    """
+
+    return gemini_quota_exhausted
+
+
 def is_quota_exhausted_error(error_text: str) -> bool:
     """
     التحقق مما إذا كان الخطأ بسبب نفاد الحصة اليومية
