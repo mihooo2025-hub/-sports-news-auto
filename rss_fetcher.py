@@ -4,7 +4,7 @@ rss_fetcher.py
 يجلب أخبار كووورة مباشرة، مع Google News RSS كخطة احتياطية.
 - المصدر الأساسي: صفحات أخبار كووورة.
 - يفحص عدة صفحات من الأحدث إلى الأقدم.
-- يحتفظ بفلترة آخر 6 ساعات.
+- يحتفظ بفلترة آخر 3 ساعات.
 - يمنع التكرار عبر الرابط والعنوان في قاعدة البيانات.
 """
 
@@ -227,7 +227,13 @@ def _fetch_kooora_direct(max_age: int, pages: int) -> list:
                 if link in seen_links:
                     continue
 
-                normalized_title = title.lower()
+                # مطابقة العنوان بشكل كامل بعد التنظيف
+                # وليس باستخدام تشابه تقريبي.
+                normalized_title = re.sub(
+                    r"\s+",
+                    " ",
+                    title.strip(),
+                ).lower()
 
                 if normalized_title in seen_titles:
                     continue
@@ -287,7 +293,13 @@ def _fetch_google_news_fallback(max_age: int) -> list:
                     continue
 
                 clean_title = _clean_title(raw_title)
-                normalized_title = clean_title.lower()
+
+                # مطابقة العنوان بشكل كامل بعد التنظيف.
+                normalized_title = re.sub(
+                    r"\s+",
+                    " ",
+                    clean_title.strip(),
+                ).lower()
 
                 if link in seen_links:
                     continue
@@ -344,10 +356,10 @@ def fetch_prioritized_news() -> list:
         {},
     )
 
-    max_age = settings.get(
-        "max_article_age_hours",
-        6,
-    )
+    # فحص الأخبار يقتصر على آخر 3 ساعات فقط.
+    # تم تثبيت القيمة هنا حتى لا تعيد إعدادات config.json
+    # مدة 6 ساعات أو مدة أخرى بالخطأ.
+    max_age = 3
 
     pages = settings.get(
         "kooora_pages",
@@ -355,6 +367,7 @@ def fetch_prioritized_news() -> list:
     )
 
     print("🔎 محاولة جلب الأخبار مباشرة من كووورة...")
+    print("⏱️ سيتم فحص الأخبار المنشورة خلال آخر 3 ساعات فقط.")
 
     direct_news = _fetch_kooora_direct(
         max_age,
