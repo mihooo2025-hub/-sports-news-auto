@@ -9,9 +9,11 @@ content_ai.py
 نظام إعادة المحاولة:
 - تتم محاولة كل مفتاح Gemini مرة واحدة فقط لكل خبر.
 - عند فشل المفتاح الحالي يتم الانتقال مباشرة إلى المفتاح التالي.
-- عند اكتشاف نفاد الحصة اليومية للمشروع، يتم إيقاف الدورة فورًا.
+- عند استنفاد حصة النموذج الحالي يتم تجربة نموذج Gemini احتياطي.
+- عند نفاد الحصة لجميع النماذج المتاحة يتم إيقاف الدورة.
 - لا توجد فترات انتظار طويلة بين المحاولات.
-- إذا فشلت جميع المفاتيح، يتم تجاوز الخبر ليعاد في الدورة التالية.
+- إذا فشلت جميع المفاتيح والنماذج لأسباب أخرى، يتم تجاوز الخبر
+  ليعاد في الدورة التالية.
 """
 
 import json
@@ -26,6 +28,13 @@ MODEL = CONFIG["gemini"].get(
     "model",
     "gemini-3.6-flash",
 )
+
+# نماذج احتياطية عند نفاد حصة النموذج الأساسي.
+# يتم تجربتها فقط عند ظهور خطأ quota الخاص بالنموذج.
+FALLBACK_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
+]
 
 
 # ==========================================================
@@ -49,7 +58,9 @@ elif isinstance(raw_api_key, str) and "," in raw_api_key:
     ]
 
 else:
-    API_KEYS = [raw_api_key] if raw_api_key else []
+    API_KEYS = [
+        raw_api_key
+    ] if raw_api_key else []
 
 
 current_key_index = 0
@@ -106,22 +117,19 @@ gemini_quota_exhausted = False
 
 def is_gemini_quota_exhausted() -> bool:
     """
-    إرجاع حالة نفاد حصة Gemini الحالية.
-
-    تستخدمها main.py لمعرفة ما إذا كان يجب
-    إيقاف بقية دورة الأخبار.
+    إرجاع حالة عدم توفر أي نموذج Gemini
+    بسبب نفاد الحصة في الدورة الحالية.
     """
 
     return gemini_quota_exhausted
 
 
-def is_quota_exhausted_error(error_text: str) -> bool:
+def is_quota_exhausted_error(
+    error_text: str,
+) -> bool:
     """
-    التحقق مما إذا كان الخطأ بسبب نفاد الحصة اليومية
-    للمشروع أو النموذج.
-
-    هذا النوع من الأخطاء لا يمكن حله بتبديل API Key
-    إذا كانت المفاتيح تابعة لنفس مشروع Google.
+    التحقق مما إذا كان الخطأ متعلقًا بنفاد
+    حصة الطلبات اليومية للنموذج/المشروع.
     """
 
     error_text = error_text.lower()
@@ -132,6 +140,7 @@ def is_quota_exhausted_error(error_text: str) -> bool:
         "quota exceeded",
         "quotaexceeded",
         "free_tier_requests",
+        "generaterequestsperdayperprojectpermodel",
     ]
 
     return any(
@@ -166,9 +175,6 @@ def get_client():
 def switch_to_next_key():
     """
     الانتقال إلى مفتاح Gemini التالي.
-
-    لا يوجد انتظار هنا؛ الانتقال يتم فورًا
-    حتى لا يستهلك الخبر وقتًا طويلًا عند فشل أحد المفاتيح.
     """
 
     global current_key_index
@@ -215,8 +221,6 @@ def process_article(
 
     global gemini_quota_exhausted
 
-    # إذا تم اكتشاف نفاد الحصة في خبر سابق،
-    # لا نحاول إرسال طلبات جديدة إلى Gemini.
     if gemini_quota_exhausted:
         return None
 
@@ -234,10 +238,6 @@ def process_article(
         f"نص الخبر الأصلي الكامل:\n{raw_text}"
     )
 
-    # ======================================================
-    # محاولة كل مفتاح مرة واحدة فقط
-    # ======================================================
-
     if not API_KEYS:
         print(
             "❌ لا توجد مفاتيح Gemini API متاحة."
@@ -245,127 +245,161 @@ def process_article(
 
         return None
 
-    max_attempts = len(API_KEYS)
+    models_to_try = []
 
-    result = None
-
-    for attempt in range(max_attempts):
-
-        try:
-            client = get_client()
-
-            print(
-                f"🤖 محاولة معالجة Gemini "
-                f"({attempt + 1}/{max_attempts})"
+    for model_name in [
+        MODEL,
+        *FALLBACK_MODELS,
+    ]:
+        if (
+            model_name
+            and model_name not in models_to_try
+        ):
+            models_to_try.append(
+                model_name
             )
 
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                ),
-            )
+    for model_name in models_to_try:
 
-            result = json.loads(
-                response.text
-            )
+        print(
+            f"🤖 النموذج المستخدم: {model_name}"
+        )
 
-            # نجاح الطلب.
-            break
+        model_quota_exhausted = False
 
-        except Exception as e:
+        max_attempts = len(API_KEYS)
 
-            error_text = str(e)
+        for attempt in range(
+            max_attempts
+        ):
 
-            print(
-                f"⚠️ فشل استدعاء Gemini "
-                f"({attempt + 1}/{max_attempts}): {e}"
-            )
-
-            # ==================================================
-            # نفاد الحصة اليومية للمشروع
-            # ==================================================
-
-            if is_quota_exhausted_error(error_text):
-
-                gemini_quota_exhausted = True
+            try:
+                client = get_client()
 
                 print(
-                    "⛔ تم اكتشاف نفاد حصة Gemini API "
-                    "للمشروع/النموذج."
+                    f"🤖 محاولة معالجة Gemini "
+                    f"({attempt + 1}/{max_attempts})"
                 )
+
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                    ),
+                )
+
+                result = json.loads(
+                    response.text
+                )
+
+                if not result:
+                    raise RuntimeError(
+                        "لم يتم الحصول على نتيجة من Gemini."
+                    )
+
+                # ==================================================
+                # التصنيفات
+                # ==================================================
+
+                result["categories"] = [
+                    c
+                    for c in result.get(
+                        "categories",
+                        [],
+                    )
+                    if c in ALLOWED_CATEGORIES
+                ]
+
+                if not result["categories"]:
+                    print(
+                        "⚠️ لم يتم تحديد تصنيف مناسب للخبر "
+                        "— سيُنشر بلا تصنيف (غير مصنف)."
+                    )
+
+                # ==================================================
+                # التأكد من العنوان
+                # ==================================================
+
+                if not result.get("title"):
+                    print(
+                        "⚠️ لم يتم توليد عنوان — "
+                        "سيتم تجاوز المقال."
+                    )
+
+                    return None
+
+                return result
+
+            except Exception as e:
+
+                error_text = str(e)
 
                 print(
-                    "⏹️ سيتم إيقاف معالجة الأخبار "
-                    "لبقية الدورة الحالية."
+                    f"⚠️ فشل استدعاء Gemini "
+                    f"({attempt + 1}/{max_attempts}) "
+                    f"باستخدام {model_name}: {e}"
                 )
 
-                return None
+                # ==================================================
+                # نفاد حصة النموذج الحالي
+                # ==================================================
 
-            # ==================================================
-            # خطأ عادي — الانتقال إلى المفتاح التالي
-            # ==================================================
+                if is_quota_exhausted_error(
+                    error_text
+                ):
+                    model_quota_exhausted = True
 
-            if attempt < max_attempts - 1:
+                    print(
+                        f"⛔ انتهت حصة النموذج {model_name}."
+                    )
 
-                switched = switch_to_next_key()
+                    # لا فائدة من تبديل API Key
+                    # إذا كانت المفاتيح من نفس المشروع.
+                    break
 
-                if switched:
-                    continue
+                # ==================================================
+                # خطأ عادي — تجربة المفتاح التالي
+                # ==================================================
 
-            # لا توجد مفاتيح أخرى.
+                if attempt < max_attempts - 1:
+
+                    switched = switch_to_next_key()
+
+                    if switched:
+                        continue
+
+                break
+
+        # ======================================================
+        # الانتقال إلى نموذج احتياطي
+        # ======================================================
+
+        if model_quota_exhausted:
+
+            if model_name != models_to_try[-1]:
+                print(
+                    "🔄 الانتقال إلى نموذج Gemini احتياطي..."
+                )
+                continue
+
+            gemini_quota_exhausted = True
+
             print(
-                "❌ انتهت جميع محاولات Gemini "
-                "لهذا الخبر — سيتم تجاوز الخبر "
-                "وإعادة محاولته في الدورة القادمة."
+                "⛔ انتهت حصص جميع نماذج Gemini المتاحة."
+            )
+
+            print(
+                "⏹️ سيتم إيقاف معالجة الأخبار لبقية الدورة الحالية."
             )
 
             return None
 
-    # ======================================================
-    # التأكد من وجود نتيجة
-    # ======================================================
+    print(
+        "❌ فشلت جميع محاولات Gemini "
+        "لهذا الخبر — سيتم تجاوز الخبر "
+        "وإعادة محاولته في الدورة القادمة."
+    )
 
-    if not result:
-        print(
-            "❌ لم يتم الحصول على نتيجة من Gemini "
-            "— سيتم تجاوز الخبر وإعادة محاولته "
-            "في الدورة القادمة."
-        )
-
-        return None
-
-    # ======================================================
-    # التصنيفات
-    # ======================================================
-
-    result["categories"] = [
-        c
-        for c in result.get(
-            "categories",
-            [],
-        )
-        if c in ALLOWED_CATEGORIES
-    ]
-
-    if not result["categories"]:
-        print(
-            "⚠️ لم يتم تحديد تصنيف مناسب للخبر "
-            "— سيُنشر بلا تصنيف (غير مصنف)."
-        )
-
-    # ======================================================
-    # التأكد من وجود العنوان
-    # ======================================================
-
-    if not result.get("title"):
-        print(
-            "⚠️ لم يتم توليد عنوان — "
-            "سيتم تجاوز المقال."
-        )
-
-        return None
-
-    return result
+    return None
