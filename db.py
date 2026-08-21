@@ -1,9 +1,17 @@
 """
 db.py
 =====
-قاعدة بيانات SQLite لتسجيل الأخبار التي تمت معالجتها.
-يتم منع التكرار عبر الرابط أو العنوان.
-الأخبار التي فشل نشرها يمكن إعادة محاولة نشرها.
+قاعدة بيانات SQLite لمنع تكرار الأخبار.
+
+يتم منع التكرار عبر:
+- الرابط بعد تنظيف بسيط.
+- العنوان بعد تنظيف المسافات واسم المصدر فقط.
+
+لا يتم إجراء تطبيع قوي للعناوين حتى لا يتم اعتبار
+أخبار مختلفة متشابهة على أنها خبر واحد.
+
+الأخبار التي تفشل في النشر بحالة publish_failed
+يمكن إعادة محاولتها.
 """
 
 import hashlib
@@ -11,6 +19,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 
 DB_PATH = os.path.join(
@@ -43,8 +52,7 @@ def init_db():
 
     try:
         cur.execute(
-            "ALTER TABLE processed_news "
-            "ADD COLUMN title_hash TEXT"
+            "ALTER TABLE processed_news ADD COLUMN title_hash TEXT"
         )
     except sqlite3.OperationalError:
         pass
@@ -58,21 +66,84 @@ def init_db():
     conn.close()
 
 
-def _hash_url(url: str) -> str:
-    return hashlib.sha256(
-        url.encode("utf-8")
-    ).hexdigest()
+def _normalize_url(url: str) -> str:
+    """
+    تنظيف بسيط للرابط فقط.
+
+    يتم تجاهل:
+    - www
+    - query parameters
+    - fragments
+    - slash في نهاية الرابط
+
+    ولا يتم تغيير مسار الخبر نفسه.
+    """
+
+    if not url:
+        return ""
+
+    try:
+        parts = urlsplit(url.strip())
+
+        host = (parts.hostname or "").lower()
+
+        if host.startswith("www."):
+            host = host[4:]
+
+        path = parts.path.rstrip("/")
+
+        return urlunsplit(
+            (
+                "https",
+                host,
+                path,
+                "",
+                "",
+            )
+        )
+
+    except Exception:
+        return url.strip().rstrip("/")
 
 
 def _normalize_title(title: str) -> str:
+    """
+    تنظيف محافظ جدًا للعنوان.
+
+    لا نغير الحروف العربية ولا نحذف علامات الترقيم.
+    فقط:
+    - إزالة اسم كووورة من نهاية العنوان.
+    - توحيد المسافات.
+    - تحويل الأحرف الإنجليزية إلى lowercase.
+    """
+
     if not title:
         return ""
 
-    return re.sub(
+    title = str(title).strip()
+
+    for suffix in (
+        " - كووورة",
+        " - كوووره",
+        " - Kooora",
+        " - kooora",
+    ):
+        if title.endswith(suffix):
+            title = title[:-len(suffix)].strip()
+
+    title = re.sub(
         r"\s+",
         " ",
         title,
-    ).strip().lower()
+    )
+
+    return title.lower()
+
+
+def _hash_url(url: str) -> str:
+    return hashlib.sha256(
+        _normalize_url(url).encode("utf-8")
+    ).hexdigest()
 
 
 def _hash_title(title: str) -> str:
@@ -85,6 +156,17 @@ def is_processed(
     url: str,
     title: str = "",
 ) -> bool:
+    """
+    التحقق من وجود الخبر سابقًا.
+
+    يمنع التكرار فقط إذا:
+    - الرابط نفسه بعد تنظيف بسيط.
+    أو
+    - العنوان نفسه بعد تنظيف بسيط.
+
+    publish_failed لا يمنع إعادة المحاولة.
+    """
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -92,14 +174,11 @@ def is_processed(
         """
         SELECT 1
         FROM processed_news
-        WHERE (url_hash = ? OR original_url = ?)
+        WHERE url_hash = ?
         AND status != 'publish_failed'
         LIMIT 1
         """,
-        (
-            _hash_url(url),
-            url,
-        ),
+        (_hash_url(url),),
     )
 
     if cur.fetchone():
@@ -148,10 +227,7 @@ def get_recent_titles(
     rows = cur.fetchall()
     conn.close()
 
-    return [
-        row[0]
-        for row in rows
-    ]
+    return [row[0] for row in rows]
 
 
 def mark_processed(
@@ -160,8 +236,14 @@ def mark_processed(
     wp_post_id: int = None,
     status: str = "published",
 ):
+    """
+    تسجيل الخبر في قاعدة البيانات.
+    """
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    normalized_url = _normalize_url(url)
 
     try:
         cur.execute(
@@ -178,8 +260,8 @@ def mark_processed(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _hash_url(url),
-                url,
+                _hash_url(normalized_url),
+                normalized_url,
                 title,
                 _hash_title(title),
                 wp_post_id,
