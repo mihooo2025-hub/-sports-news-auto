@@ -2,6 +2,8 @@
 main.py
 =======
 إدارة دورة جلب الأخبار ومعالجتها ونشرها في WordPress.
+الأخبار التي تفشل معالجتها أو نشرها لا تعتبر مكتملة
+وتتم إعادة محاولتها في الدورة التالية.
 """
 
 import sys
@@ -12,31 +14,26 @@ from config import CONFIG
 from rss_fetcher import fetch_prioritized_news
 from article_extractor import extract_article
 from content_ai import process_article
-from wordpress_publisher import (
-    publish_post,
-    test_authentication,
-)
-from telegram_reporter import (
-    send_cycle_report,
-    send_error_alert,
-)
+from wordpress_publisher import publish_post, test_authentication
+from telegram_reporter import send_cycle_report, send_error_alert
 
 
-def mark_db_record(
-    url: str,
-    title: str,
-    status: str,
-):
+def mark_db_record(url: str, title: str, status: str):
     """
-    تسجيل حالة الخبر بشكل صحيح.
-    الأخبار الفاشلة في المحتوى أو الذكاء الاصطناعي
-    لا يتم تسجيلها هنا حتى تعاد محاولتها لاحقًا.
+    تسجيل الحالات التي يجب حفظها فقط.
+
+    الأخبار التي تفشل أثناء المعالجة لا يتم تسجيلها،
+    وبالتالي تبقى قابلة لإعادة المحاولة في الدورة القادمة.
     """
 
-    if status in {
+    # هذه الحالات لا تعتبر معالجة.
+    retry_statuses = {
         "skipped_no_content",
         "ai_failed",
-    }:
+        "invalid_ai_result",
+    }
+
+    if status in retry_statuses:
         return
 
     db.mark_processed(
@@ -46,36 +43,29 @@ def mark_db_record(
     )
 
 
-def map_category_names_to_ids(
-    category_names: list,
-) -> list:
-    configured = CONFIG.get(
-        "categories",
-        [],
-    )
+def map_category_names_to_ids(category_names: list) -> list:
+    """
+    الاحتفاظ فقط بالتصنيفات الموجودة في config.json.
+    """
 
-    if not isinstance(
-        configured,
-        list,
-    ):
+    configured = CONFIG.get("categories", [])
+
+    if not isinstance(configured, list):
         return category_names
 
-    matched = [
+    return [
         category
         for category in category_names
         if category in configured
     ]
 
-    return matched
-
 
 def run_pipeline():
-    print(
-        "🚀 بدء دورة جلب ونشر الأخبار الرياضية..."
-    )
+    print("🚀 بدء دورة جلب ونشر الأخبار الرياضية...")
 
     db.init_db()
 
+    # التحقق من WordPress قبل بدء المعالجة.
     if not test_authentication():
         print(
             "❌ تعذر الوصول إلى WordPress — "
@@ -89,9 +79,8 @@ def run_pipeline():
 
         return
 
-    # 1. جلب جميع الأخبار الجديدة المتاحة.
+    # 1. جلب الأخبار الجديدة.
     news_items = fetch_prioritized_news()
-
     checked_count = len(news_items)
 
     if not news_items:
@@ -99,12 +88,7 @@ def run_pipeline():
             "ℹ️ لم يتم العثور على أخبار جديدة في هذه الدورة."
         )
 
-        send_cycle_report(
-            [],
-            0,
-            0,
-        )
-
+        send_cycle_report([], 0, 0)
         return
 
     print(
@@ -115,43 +99,42 @@ def run_pipeline():
     published_items = []
     skipped_count = 0
 
-    for idx, item in enumerate(
-        news_items,
-        start=1,
-    ):
-        source_title = item.get(
-            "title",
-            "",
-        )
+    for idx, item in enumerate(news_items, start=1):
 
-        source_link = item.get(
-            "link",
-            "",
-        )
-
-        matched_keyword = item.get(
-            "matched_keyword",
-            "",
-        )
+        source_title = item.get("title", "")
+        source_link = item.get("link", "")
+        matched_keyword = item.get("matched_keyword", "")
 
         print(
             f"\n[{idx}/{checked_count}] "
             f"جاري معالجة الخبر: {source_title}"
         )
 
-        # 2. استخراج محتوى الخبر والصورة.
-        extracted_data = extract_article(
-            source_link
-        )
+        # --------------------------------------------------
+        # 2. استخراج المقال
+        # --------------------------------------------------
 
-        if extracted_data.get(
-            "blocked"
-        ):
+        try:
+            extracted_data = extract_article(source_link)
+        except Exception as e:
             print(
-                "🚫 تجاوز الخبر لأنه ينتمي "
-                "لنطاق ممنوع."
+                f"⚠️ حدث خطأ أثناء استخراج المقال: {e}"
             )
 
+            print(
+                "🔄 لن يتم تسجيل الخبر، "
+                "وسيتم إعادة محاولته في الدورة القادمة."
+            )
+
+            skipped_count += 1
+            continue
+
+        if extracted_data.get("blocked"):
+            print(
+                "🚫 تجاوز الخبر لأنه ينتمي إلى نطاق ممنوع."
+            )
+
+            # هذا ليس فشل معالجة؛ لذلك يمنع إعادة المحاولة.
             mark_db_record(
                 source_link,
                 source_title,
@@ -161,10 +144,7 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        raw_content = extracted_data.get(
-            "text",
-            "",
-        )
+        raw_content = extracted_data.get("text", "")
 
         image_url = (
             extracted_data.get("image_url")
@@ -177,31 +157,53 @@ def run_pipeline():
             or source_link
         )
 
-        if (
-            not extracted_data.get("success")
-            or not raw_content
-        ):
+        if not extracted_data.get("success") or not raw_content:
             print(
-                "⚠️ تعذر جلب محتوى المقال "
-                "— سيتم إعادة المحاولة لاحقًا."
+                "⚠️ تعذر جلب محتوى المقال."
+            )
+
+            print(
+                "🔄 لن يتم تسجيل الخبر، "
+                "وسيتم إعادة محاولته في الدورة القادمة."
             )
 
             skipped_count += 1
             continue
 
-        # 3. إعادة الصياغة.
-        ai_result = process_article(
-            raw_content,
-            source_title,
-            matched_keyword,
-        )
+        # --------------------------------------------------
+        # 3. معالجة الخبر بالذكاء الاصطناعي
+        # --------------------------------------------------
 
+        try:
+            ai_result = process_article(
+                raw_content,
+                source_title,
+                matched_keyword,
+            )
+        except Exception as e:
+            print(
+                f"⚠️ حدث خطأ أثناء معالجة Gemini: {e}"
+            )
+
+            print(
+                "🔄 لن يتم تسجيل الخبر، "
+                "وسيتم إعادة محاولته في الدورة القادمة."
+            )
+
+            skipped_count += 1
+            continue
+
+        # تأخير بين طلبات Gemini.
         time.sleep(5)
 
         if not ai_result:
             print(
-                "⚠️ فشلت معالجة المقال بالذكاء الاصطناعي "
-                "— ستتم إعادة المحاولة في الدورة القادمة."
+                "⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي."
+            )
+
+            print(
+                "🔄 لن يتم تسجيل الخبر، "
+                "وسيتم إعادة محاولته في الدورة القادمة."
             )
 
             skipped_count += 1
@@ -224,36 +226,66 @@ def run_pipeline():
 
         if not rewritten_title or not rewritten_content:
             print(
-                "⚠️ نتيجة الذكاء الاصطناعي ناقصة "
-                "— سيتم إعادة المحاولة لاحقًا."
+                "⚠️ نتيجة الذكاء الاصطناعي ناقصة."
+            )
+
+            print(
+                "🔄 لن يتم تسجيل الخبر، "
+                "وسيتم إعادة محاولته في الدورة القادمة."
             )
 
             skipped_count += 1
             continue
 
-        # 4. مطابقة التصنيفات.
-        categories_to_publish = (
-            map_category_names_to_ids(
-                category_names
+        # --------------------------------------------------
+        # 4. مطابقة التصنيفات
+        # --------------------------------------------------
+
+        categories_to_publish = map_category_names_to_ids(
+            category_names
+        )
+
+        # --------------------------------------------------
+        # 5. نشر الخبر في WordPress
+        # --------------------------------------------------
+
+        try:
+            site_url = publish_post(
+                title=rewritten_title,
+                content=rewritten_content,
+                categories=categories_to_publish,
+                image_url=image_url,
             )
-        )
+        except Exception as e:
+            print(
+                f"❌ حدث خطأ أثناء النشر في WordPress: {e}"
+            )
 
-        # 5. النشر في WordPress.
-        site_url = publish_post(
-            title=rewritten_title,
-            content=rewritten_content,
-            categories=categories_to_publish,
-            image_url=image_url,
-        )
+            # نسجل publish_failed فقط.
+            # db.is_processed() يتجاهل هذه الحالة،
+            # وبالتالي سيعاد الخبر في الدورة القادمة.
+            mark_db_record(
+                source_link,
+                source_title,
+                "publish_failed",
+            )
 
+            skipped_count += 1
+            continue
+
+        # تأخير بسيط بعد النشر.
         time.sleep(2)
+
+        # --------------------------------------------------
+        # 6. تحديد نتيجة النشر
+        # --------------------------------------------------
 
         if site_url:
             print(
-                f"✅ تم النشر بنجاح مع الصورة: "
-                f"{site_url}"
+                f"✅ تم النشر بنجاح مع الصورة: {site_url}"
             )
 
+            # هنا فقط يعتبر الخبر معالجًا بنجاح.
             mark_db_record(
                 source_link,
                 source_title,
@@ -270,8 +302,11 @@ def run_pipeline():
 
         else:
             print(
-                "❌ فشل النشر في ووردبريس "
-                "— ستتم إعادة المحاولة."
+                "❌ فشل النشر في WordPress."
+            )
+
+            print(
+                "🔄 سيتم إعادة محاولة الخبر في الدورة القادمة."
             )
 
             mark_db_record(
@@ -282,7 +317,10 @@ def run_pipeline():
 
             skipped_count += 1
 
-    # 6. تقرير الدورة.
+    # ------------------------------------------------------
+    # 7. إرسال تقرير الدورة
+    # ------------------------------------------------------
+
     send_cycle_report(
         published_items,
         checked_count,
@@ -303,12 +341,8 @@ if __name__ == "__main__":
             f"حدث خطأ غير متوقع أثناء تنفيذ الدورة: {e}"
         )
 
-        print(
-            f"💥 {error_msg}"
-        )
+        print(f"💥 {error_msg}")
 
-        send_error_alert(
-            error_msg
-        )
+        send_error_alert(error_msg)
 
         sys.exit(1)
