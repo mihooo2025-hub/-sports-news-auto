@@ -16,6 +16,7 @@ main.py
 
 import sys
 import time
+from datetime import datetime, timezone
 
 import db
 from config import CONFIG
@@ -25,23 +26,23 @@ from content_ai import (
     process_article,
     is_gemini_quota_exhausted,
 )
-from wordpress_publisher import publish_post, test_authentication
-from telegram_reporter import send_cycle_report, send_error_alert
+from wordpress_publisher import (
+    publish_post,
+    test_authentication,
+)
+from telegram_reporter import (
+    send_cycle_report,
+    send_error_alert,
+)
 
 
-def mark_db_record(url: str, title: str, status: str):
+def mark_db_record(
+    url: str,
+    title: str,
+    status: str,
+):
     """
     تسجيل حالة الخبر في قاعدة البيانات.
-
-    publish_failed:
-        فشل مؤقت، ويعاد محاولة الخبر في الدورات التالية
-        لمدة أقصاها 6 ساعات حسب منطق db.py.
-
-    published:
-        الخبر تمت معالجته ونشره بنجاح.
-
-    skipped_blocked_domain:
-        خبر تم تجاوزه نهائيًا بسبب نطاق ممنوع.
     """
 
     db.mark_processed(
@@ -51,10 +52,18 @@ def mark_db_record(url: str, title: str, status: str):
     )
 
 
-def map_category_names_to_ids(category_names: list) -> list:
-    configured = CONFIG.get("categories", [])
+def map_category_names_to_ids(
+    category_names: list,
+) -> list:
+    configured = CONFIG.get(
+        "categories",
+        [],
+    )
 
-    if not isinstance(configured, list):
+    if not isinstance(
+        configured,
+        list,
+    ):
         return category_names
 
     return [
@@ -65,7 +74,22 @@ def map_category_names_to_ids(category_names: list) -> list:
 
 
 def run_pipeline():
-    print("🚀 بدء دورة جلب ونشر الأخبار الرياضية...")
+    # ======================================================
+    # تثبيت وقت بداية الدورة قبل أي خطوة أخرى
+    # ======================================================
+
+    cycle_start = datetime.now(
+        timezone.utc
+    )
+
+    print(
+        "🚀 بدء دورة جلب ونشر الأخبار الرياضية..."
+    )
+
+    print(
+        f"🕐 وقت بداية الدورة: "
+        f"{cycle_start.isoformat()}"
+    )
 
     db.init_db()
 
@@ -82,20 +106,35 @@ def run_pipeline():
 
         return
 
-    news_items = fetch_prioritized_news()
-    checked_count = len(news_items)
+    # ======================================================
+    # جلب الأخبار ضمن نافذة 3 ساعات من بداية الدورة
+    # ======================================================
+
+    news_items = fetch_prioritized_news(
+        cycle_start=cycle_start
+    )
+
+    checked_count = len(
+        news_items
+    )
 
     if not news_items:
         print(
-            "ℹ️ لم يتم العثور على أخبار جديدة في هذه الدورة."
+            "ℹ️ لم يتم العثور على أخبار جديدة ضمن آخر 3 ساعات "
+            "من بداية الدورة."
         )
 
-        send_cycle_report([], 0, 0)
+        send_cycle_report(
+            [],
+            0,
+            0,
+        )
+
         return
 
     print(
         f"🔍 تم العثور على {checked_count} "
-        "خبر جديد للمعالجة."
+        "خبر ضمن نافذة آخر 3 ساعات."
     )
 
     published_items = []
@@ -108,19 +147,39 @@ def run_pipeline():
 
     quota_exhausted = False
 
-    for idx, item in enumerate(news_items, start=1):
+    for idx, item in enumerate(
+        news_items,
+        start=1,
+    ):
 
-        source_title = item.get("title", "")
-        source_link = item.get("link", "")
-        matched_keyword = item.get("matched_keyword", "")
+        source_title = item.get(
+            "title",
+            "",
+        )
+
+        source_link = item.get(
+            "link",
+            "",
+        )
+
+        matched_keyword = item.get(
+            "matched_keyword",
+            "",
+        )
 
         print(
             f"\n[{idx}/{checked_count}] "
             f"جاري معالجة الخبر: {source_title}"
         )
 
+        # ==================================================
+        # استخراج المقال
+        # ==================================================
+
         try:
-            extracted_data = extract_article(source_link)
+            extracted_data = extract_article(
+                source_link
+            )
 
         except Exception as e:
             print(
@@ -142,7 +201,13 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        if extracted_data.get("blocked"):
+        # ==================================================
+        # نطاق ممنوع
+        # ==================================================
+
+        if extracted_data.get(
+            "blocked"
+        ):
             print(
                 "🚫 تجاوز الخبر لأنه ينتمي إلى نطاق ممنوع."
             )
@@ -157,20 +222,40 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        raw_content = extracted_data.get("text", "")
+        raw_content = extracted_data.get(
+            "text",
+            "",
+        )
 
         image_url = (
-            extracted_data.get("image_url")
-            or extracted_data.get("image")
-            or item.get("image_url")
+            extracted_data.get(
+                "image_url"
+            )
+            or extracted_data.get(
+                "image"
+            )
+            or item.get(
+                "image_url"
+            )
         )
 
         resolved_url = (
-            extracted_data.get("resolved_url")
+            extracted_data.get(
+                "resolved_url"
+            )
             or source_link
         )
 
-        if not extracted_data.get("success") or not raw_content:
+        # ==================================================
+        # فشل استخراج المحتوى
+        # ==================================================
+
+        if (
+            not extracted_data.get(
+                "success"
+            )
+            or not raw_content
+        ):
             print(
                 "⚠️ تعذر جلب محتوى المقال."
             )
@@ -189,6 +274,10 @@ def run_pipeline():
             failed_extraction += 1
             skipped_count += 1
             continue
+
+        # ==================================================
+        # Gemini
+        # ==================================================
 
         try:
             ai_result = process_article(
@@ -218,23 +307,32 @@ def run_pipeline():
             continue
 
         # ==================================================
-        # نفاد حصة Gemini
+        # نفاد جميع حصص Gemini
         # ==================================================
 
         if is_gemini_quota_exhausted():
             print(
-                "⛔ نفدت حصة Gemini API."
+                "⛔ لم يعد هناك نموذج Gemini متاح "
+                "للمعالجة في هذه الدورة."
             )
 
             print(
-                "⏹️ سيتم إيقاف الدورة الآن دون تسجيل "
-                "الخبر الحالي أو الأخبار المتبقية كفشل."
+                "⏹️ سيتم إيقاف الدورة الآن."
+            )
+
+            print(
+                "ℹ️ الخبر الحالي والأخبار المتبقية "
+                "لن يتم تسجيلها كفشل."
             )
 
             quota_exhausted = True
             break
 
         time.sleep(5)
+
+        # ==================================================
+        # فشل Gemini عادي
+        # ==================================================
 
         if not ai_result:
             print(
@@ -271,7 +369,14 @@ def run_pipeline():
             [],
         )
 
-        if not rewritten_title or not rewritten_content:
+        # ==================================================
+        # نتيجة Gemini ناقصة
+        # ==================================================
+
+        if (
+            not rewritten_title
+            or not rewritten_content
+        ):
             print(
                 "⚠️ نتيجة الذكاء الاصطناعي ناقصة."
             )
@@ -291,9 +396,15 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        categories_to_publish = map_category_names_to_ids(
-            category_names
+        categories_to_publish = (
+            map_category_names_to_ids(
+                category_names
+            )
         )
+
+        # ==================================================
+        # WordPress
+        # ==================================================
 
         try:
             site_url = publish_post(
@@ -325,9 +436,13 @@ def run_pipeline():
 
         time.sleep(2)
 
+        # ==================================================
+        # نجاح النشر
+        # ==================================================
+
         if site_url:
             print(
-                f"✅ تم النشر بنجاح مع الصورة: {site_url}"
+                f"✅ تم النشر بنجاح: {site_url}"
             )
 
             mark_db_record(
@@ -364,23 +479,52 @@ def run_pipeline():
             skipped_count += 1
 
     # ======================================================
-    # تقرير السجل
+    # تقرير الدورة
     # ======================================================
 
-    print("\n📊 تفاصيل نتائج الدورة:")
-    print(f"✅ نُشر بنجاح: {len(published_items)}")
-    print(f"⚠️ فشل استخراج المقال: {failed_extraction}")
-    print(f"🤖 فشل معالجة الذكاء الاصطناعي: {failed_ai}")
-    print(f"❌ فشل النشر في WordPress: {failed_publish}")
-    print(f"🚫 نطاقات ممنوعة: {blocked_domain}")
-    print(f"🔍 إجمالي الأخبار المفحوصة: {checked_count}")
-    print(f"❌ إجمالي الفشل/التجاوز: {skipped_count}")
+    print(
+        "\n📊 تفاصيل نتائج الدورة:"
+    )
+
+    print(
+        f"✅ نُشر بنجاح: "
+        f"{len(published_items)}"
+    )
+
+    print(
+        f"⚠️ فشل استخراج المقال: "
+        f"{failed_extraction}"
+    )
+
+    print(
+        f"🤖 فشل معالجة الذكاء الاصطناعي: "
+        f"{failed_ai}"
+    )
+
+    print(
+        f"❌ فشل النشر في WordPress: "
+        f"{failed_publish}"
+    )
+
+    print(
+        f"🚫 نطاقات ممنوعة: "
+        f"{blocked_domain}"
+    )
+
+    print(
+        f"🔍 الأخبار المقبولة ضمن نافذة 3 ساعات: "
+        f"{checked_count}"
+    )
+
+    print(
+        f"❌ إجمالي الفشل/التجاوز: "
+        f"{skipped_count}"
+    )
 
     if quota_exhausted:
         print(
-            "⏸️ توقفت الدورة بسبب نفاد حصة Gemini. "
-            "الأخبار التي لم تتم معالجتها ستبقى متاحة "
-            "للدورة التالية."
+            "⏸️ توقفت الدورة بسبب عدم توفر "
+            "حصة Gemini لأي من النماذج المتاحة."
         )
 
     send_cycle_report(
@@ -403,8 +547,12 @@ if __name__ == "__main__":
             f"حدث خطأ غير متوقع أثناء تنفيذ الدورة: {e}"
         )
 
-        print(f"💥 {error_msg}")
+        print(
+            f"💥 {error_msg}"
+        )
 
-        send_error_alert(error_msg)
+        send_error_alert(
+            error_msg
+        )
 
         sys.exit(1)
