@@ -14,14 +14,13 @@
   },
   "fetch_settings": {
     "max_article_age_hours": 6,
-    "max_articles_checked_per_cycle": 10,
-    "max_articles_published_per_cycle": 10,
+    "kooora_pages": 3,
     "language": "ar",
     "country": "EG"
   },
   "rss_sources": [
     {
-      "name": "Kooora (AR)",
+      "name": "Kooora (Google News Fallback)",
       "url": "https://news.google.com/rss/search?q=site:kooora.com&hl=ar&gl=EG&ceid=EG:ar"
     }
   ],
