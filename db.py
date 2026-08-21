@@ -136,7 +136,7 @@ def _failed_retry_expired(created_at: str) -> bool:
     """
     التحقق من انتهاء مدة إعادة محاولة الخبر الفاشل.
 
-    إذا مر أكثر من 6 ساعات على وقت تسجيل الفشل،
+    إذا مر أكثر من 6 ساعات على وقت أول فشل،
     يتم تجاهل الخبر نهائيًا.
     """
 
@@ -197,7 +197,7 @@ def is_processed(
 
     الأخبار التي فشلت في المعالجة:
     - يعاد فحصها ومحاولة معالجتها خلال أول 6 ساعات.
-    - بعد مرور 6 ساعات على الفشل يتم تجاهلها نهائيًا.
+    - بعد مرور 6 ساعات على أول فشل يتم تجاهلها نهائيًا.
     """
 
     conn = sqlite3.connect(DB_PATH)
@@ -282,7 +282,7 @@ def mark_processed(
     try:
         cur.execute(
             """
-            SELECT id
+            SELECT id, status, created_at
             FROM processed_news
             WHERE url_hash = ?
             LIMIT 1
@@ -293,6 +293,19 @@ def mark_processed(
         existing = cur.fetchone()
 
         if existing:
+            existing_id = existing[0]
+            existing_status = existing[1]
+            existing_created_at = existing[2]
+
+            # عند إعادة تسجيل نفس الخبر كـ publish_failed،
+            # نحافظ على وقت أول فشل بدل تجديد مدة الـ6 ساعات.
+            if (
+                status == "publish_failed"
+                and existing_status == "publish_failed"
+                and existing_created_at
+            ):
+                created_at = existing_created_at
+
             cur.execute(
                 """
                 UPDATE processed_news
@@ -312,7 +325,7 @@ def mark_processed(
                     wp_post_id,
                     status,
                     created_at,
-                    existing[0],
+                    existing_id,
                 ),
             )
 
