@@ -21,7 +21,10 @@ import db
 from config import CONFIG
 from rss_fetcher import fetch_prioritized_news
 from article_extractor import extract_article
-from content_ai import process_article
+from content_ai import (
+    process_article,
+    is_gemini_quota_exhausted,
+)
 from wordpress_publisher import publish_post, test_authentication
 from telegram_reporter import send_cycle_report, send_error_alert
 
@@ -102,6 +105,8 @@ def run_pipeline():
     failed_ai = 0
     failed_publish = 0
     blocked_domain = 0
+
+    quota_exhausted = False
 
     for idx, item in enumerate(news_items, start=1):
 
@@ -211,6 +216,23 @@ def run_pipeline():
             failed_ai += 1
             skipped_count += 1
             continue
+
+        # ==================================================
+        # نفاد حصة Gemini
+        # ==================================================
+
+        if is_gemini_quota_exhausted():
+            print(
+                "⛔ نفدت حصة Gemini API."
+            )
+
+            print(
+                "⏹️ سيتم إيقاف الدورة الآن دون تسجيل "
+                "الخبر الحالي أو الأخبار المتبقية كفشل."
+            )
+
+            quota_exhausted = True
+            break
 
         time.sleep(5)
 
@@ -341,6 +363,10 @@ def run_pipeline():
             failed_publish += 1
             skipped_count += 1
 
+    # ======================================================
+    # تقرير السجل
+    # ======================================================
+
     print("\n📊 تفاصيل نتائج الدورة:")
     print(f"✅ نُشر بنجاح: {len(published_items)}")
     print(f"⚠️ فشل استخراج المقال: {failed_extraction}")
@@ -349,6 +375,13 @@ def run_pipeline():
     print(f"🚫 نطاقات ممنوعة: {blocked_domain}")
     print(f"🔍 إجمالي الأخبار المفحوصة: {checked_count}")
     print(f"❌ إجمالي الفشل/التجاوز: {skipped_count}")
+
+    if quota_exhausted:
+        print(
+            "⏸️ توقفت الدورة بسبب نفاد حصة Gemini. "
+            "الأخبار التي لم تتم معالجتها ستبقى متاحة "
+            "للدورة التالية."
+        )
 
     send_cycle_report(
         published_items,
