@@ -9,9 +9,9 @@ content_ai.py
 نظام إعادة المحاولة:
 - تتم محاولة كل مفتاح Gemini مرة واحدة فقط لكل خبر.
 - عند فشل المفتاح الحالي يتم الانتقال مباشرة إلى المفتاح التالي.
+- عند اكتشاف نفاد الحصة اليومية للمشروع، يتم إيقاف الدورة فورًا.
 - لا توجد فترات انتظار طويلة بين المحاولات.
 - إذا فشلت جميع المفاتيح، يتم تجاوز الخبر ليعاد في الدورة التالية.
-- عند نفاد حصة Gemini بالكامل يتم إيقاف معالجة الأخبار لبقية الدورة.
 """
 
 import json
@@ -54,10 +54,6 @@ else:
 
 current_key_index = 0
 
-# يتم تفعيل هذا المتغير عند التأكد من نفاد حصة Gemini.
-# يبقى فعالًا طوال تشغيل الدورة الحالية فقط.
-gemini_quota_exhausted = False
-
 
 # ==========================================================
 # التصنيفات
@@ -99,6 +95,38 @@ SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
         ensure_ascii=False,
     ),
 )
+
+
+# ==========================================================
+# حالة نفاد حصة Gemini
+# ==========================================================
+
+gemini_quota_exhausted = False
+
+
+def is_quota_exhausted_error(error_text: str) -> bool:
+    """
+    التحقق مما إذا كان الخطأ بسبب نفاد الحصة اليومية
+    للمشروع أو النموذج.
+
+    هذا النوع من الأخطاء لا يمكن حله بتبديل API Key
+    إذا كانت المفاتيح تابعة لنفس مشروع Google.
+    """
+
+    error_text = error_text.lower()
+
+    quota_indicators = [
+        "resource_exhausted",
+        "generate_requests_per_day_per_project",
+        "quota exceeded",
+        "quotaexceeded",
+        "free_tier_requests",
+    ]
+
+    return any(
+        indicator in error_text
+        for indicator in quota_indicators
+    )
 
 
 # ==========================================================
@@ -150,41 +178,6 @@ def switch_to_next_key():
 
 
 # ==========================================================
-# حالة حصة Gemini
-# ==========================================================
-
-def is_gemini_quota_exhausted() -> bool:
-    """
-    إرجاع حالة نفاد حصة Gemini.
-
-    تستخدمها main.py لمعرفة ما إذا كان يجب إيقاف
-    معالجة بقية الأخبار في الدورة الحالية.
-    """
-
-    return gemini_quota_exhausted
-
-
-def is_quota_exhausted_error(error_text: str) -> bool:
-    """
-    التحقق مما إذا كان الخطأ ناتجًا عن نفاد حصة Gemini.
-    """
-
-    error_text = error_text.upper()
-
-    quota_indicators = (
-        "RESOURCE_EXHAUSTED",
-        "QUOTA EXCEEDED",
-        "GENERATEREQUESTSPERDAYPERPROJECTPERMODEL",
-        "EXCEEDED YOUR CURRENT QUOTA",
-    )
-
-    return any(
-        indicator in error_text
-        for indicator in quota_indicators
-    )
-
-
-# ==========================================================
 # فحص التكرار الدلالي
 # ==========================================================
 
@@ -211,14 +204,9 @@ def process_article(
 
     global gemini_quota_exhausted
 
-    # إذا تم التأكد مسبقًا من نفاد الحصة،
-    # لا نرسل أي طلب جديد إلى Gemini.
+    # إذا تم اكتشاف نفاد الحصة في خبر سابق،
+    # لا نحاول إرسال طلبات جديدة إلى Gemini.
     if gemini_quota_exhausted:
-        print(
-            "⛔ تم إيقاف معالجة Gemini لهذه الدورة "
-            "بسبب نفاد حصة API."
-        )
-
         return None
 
     if not raw_text or len(raw_text) < 100:
@@ -285,25 +273,30 @@ def process_article(
                 f"({attempt + 1}/{max_attempts}): {e}"
             )
 
-            # نفاد الحصة مشكلة عامة وليست مشكلة في الخبر.
-            # لذلك لا ننتقل إلى مفتاح آخر ولا نسجل الخبر كفاشل.
+            # ==================================================
+            # نفاد الحصة اليومية للمشروع
+            # ==================================================
+
             if is_quota_exhausted_error(error_text):
+
                 gemini_quota_exhausted = True
 
                 print(
                     "⛔ تم اكتشاف نفاد حصة Gemini API "
-                    "لهذا المشروع/النموذج."
+                    "للمشروع/النموذج."
                 )
 
                 print(
-                    "⏹️ سيتم إيقاف معالجة الأخبار لبقية "
-                    "الدورة الحالية."
+                    "⏹️ سيتم إيقاف معالجة الأخبار "
+                    "لبقية الدورة الحالية."
                 )
 
                 return None
 
-            # إذا كان هناك مفتاح آخر،
-            # ننتقل إليه فورًا بدون انتظار.
+            # ==================================================
+            # خطأ عادي — الانتقال إلى المفتاح التالي
+            # ==================================================
+
             if attempt < max_attempts - 1:
 
                 switched = switch_to_next_key()
