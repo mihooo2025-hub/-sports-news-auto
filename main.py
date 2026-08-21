@@ -10,7 +10,7 @@ main.py
 
 تسجل كـ publish_failed وتتم إعادة محاولتها في الدورات التالية.
 
-تتم إعادة محاولة الخبر الفاشل لمدة أقصاها 3 ساعات
+تتم إعادة محاولة الخبر الفاشل لمدة أقصاها 6 ساعات
 من وقت أول فشل، وبعدها يتم تجاهله.
 """
 
@@ -32,7 +32,7 @@ def mark_db_record(url: str, title: str, status: str):
 
     publish_failed:
         فشل مؤقت، ويعاد محاولة الخبر في الدورات التالية
-        لمدة أقصاها 3 ساعات حسب منطق db.py.
+        لمدة أقصاها 6 ساعات حسب منطق db.py.
 
     published:
         الخبر تمت معالجته ونشره بنجاح.
@@ -49,10 +49,6 @@ def mark_db_record(url: str, title: str, status: str):
 
 
 def map_category_names_to_ids(category_names: list) -> list:
-    """
-    الاحتفاظ فقط بالتصنيفات الموجودة في config.json.
-    """
-
     configured = CONFIG.get("categories", [])
 
     if not isinstance(configured, list):
@@ -70,7 +66,6 @@ def run_pipeline():
 
     db.init_db()
 
-    # التحقق من WordPress قبل بدء المعالجة.
     if not test_authentication():
         print(
             "❌ تعذر الوصول إلى WordPress — "
@@ -84,7 +79,6 @@ def run_pipeline():
 
         return
 
-    # 1. جلب الأخبار الجديدة.
     news_items = fetch_prioritized_news()
     checked_count = len(news_items)
 
@@ -115,10 +109,6 @@ def run_pipeline():
             f"جاري معالجة الخبر: {source_title}"
         )
 
-        # --------------------------------------------------
-        # 2. استخراج المقال
-        # --------------------------------------------------
-
         try:
             extracted_data = extract_article(source_link)
 
@@ -146,7 +136,6 @@ def run_pipeline():
                 "🚫 تجاوز الخبر لأنه ينتمي إلى نطاق ممنوع."
             )
 
-            # هذا ليس فشل معالجة؛ لذلك لا تتم إعادة المحاولة.
             mark_db_record(
                 source_link,
                 source_title,
@@ -188,10 +177,6 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        # --------------------------------------------------
-        # 3. معالجة الخبر بالذكاء الاصطناعي
-        # --------------------------------------------------
-
         try:
             ai_result = process_article(
                 raw_content,
@@ -218,7 +203,6 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        # تأخير بين طلبات Gemini.
         time.sleep(5)
 
         if not ai_result:
@@ -274,17 +258,9 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        # --------------------------------------------------
-        # 4. مطابقة التصنيفات
-        # --------------------------------------------------
-
         categories_to_publish = map_category_names_to_ids(
             category_names
         )
-
-        # --------------------------------------------------
-        # 5. نشر الخبر في WordPress
-        # --------------------------------------------------
 
         try:
             site_url = publish_post(
@@ -313,19 +289,13 @@ def run_pipeline():
             skipped_count += 1
             continue
 
-        # تأخير بسيط بعد النشر.
         time.sleep(2)
-
-        # --------------------------------------------------
-        # 6. تحديد نتيجة النشر
-        # --------------------------------------------------
 
         if site_url:
             print(
                 f"✅ تم النشر بنجاح مع الصورة: {site_url}"
             )
 
-            # هنا فقط يعتبر الخبر معالجًا بنجاح.
             mark_db_record(
                 source_link,
                 source_title,
@@ -357,10 +327,6 @@ def run_pipeline():
             )
 
             skipped_count += 1
-
-    # ------------------------------------------------------
-    # 7. إرسال تقرير الدورة
-    # ------------------------------------------------------
 
     send_cycle_report(
         published_items,
