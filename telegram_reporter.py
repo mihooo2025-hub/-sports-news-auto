@@ -9,6 +9,7 @@ Requires Telegram Bot Token (from BotFather) and Group ID (chat_id) in config.js
 or provided via environment variables (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).
 """
 
+import html
 import requests
 from config import CONFIG
 
@@ -83,11 +84,23 @@ def send_cycle_report(published_items: list, checked_count: int, skipped_count: 
         title = item.get("title", "بدون عنوان")
         source_url = item.get("source_url", "غير متوفر")
         site_url = item.get("site_url") or item.get("post_url") or "غير متوفر"
+
+        title = html.escape(str(title))
+
+        if source_url and source_url != "غير متوفر":
+            source_link = f'<a href="{html.escape(str(source_url), quote=True)}">رابط الخبر الأصلي</a>'
+        else:
+            source_link = "غير متوفر"
+
+        if site_url and site_url != "غير متوفر":
+            site_link = f'<a href="{html.escape(str(site_url), quote=True)}">رابط الخبر الجديد</a>'
+        else:
+            site_link = "غير متوفر"
         
         lines.append(
             f"\n{i}. <b>{title}</b>\n"
-            f"🔗 المصدر الأصلي (القديم): {source_url}\n"
-            f"🌐 الخبر الجديد (الموقع): {site_url}"
+            f"🔗 المصدر الأصلي: {source_link}\n"
+            f"🌐 الخبر الجديد: {site_link}"
         )
 
     for chunk in _chunk_message(lines, header):
