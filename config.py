@@ -46,6 +46,20 @@ def load_config() -> dict:
         if env_value:
             cfg.setdefault(section, {})[key] = env_value
 
+    # دعم إضافة مفاتيح Gemini إضافية من متغيرات البيئة (GEMINI_API_KEY_2, GEMINI_API_KEY_3... إلخ)
+    extra_gemini_keys = []
+    i = 2
+    while os.environ.get(f"GEMINI_API_KEY_{i}"):
+        extra_gemini_keys.append(os.environ.get(f"GEMINI_API_KEY_{i}").strip())
+        i += 1
+
+    if extra_gemini_keys:
+        current_key = cfg.get("gemini", {}).get("api_key", "")
+        if isinstance(current_key, list):
+            cfg["gemini"]["api_key"] = current_key + extra_gemini_keys
+        elif isinstance(current_key, str) and current_key:
+            cfg["gemini"]["api_key"] = [current_key] + extra_gemini_keys
+
     required_paths = [
         ("wordpress", "site_url"),
         ("wordpress", "username"),
