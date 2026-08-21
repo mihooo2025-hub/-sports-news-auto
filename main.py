@@ -2,8 +2,16 @@
 main.py
 =======
 إدارة دورة جلب الأخبار ومعالجتها ونشرها في WordPress.
-الأخبار التي تفشل معالجتها أو نشرها لا تعتبر مكتملة
-وتتم إعادة محاولتها في الدورة التالية.
+
+الأخبار التي تفشل أثناء:
+- استخراج المقال
+- معالجة الذكاء الاصطناعي
+- النشر في WordPress
+
+تسجل كـ publish_failed وتتم إعادة محاولتها في الدورات التالية.
+
+تتم إعادة محاولة الخبر الفاشل لمدة أقصاها 5 ساعات
+من وقت أول فشل، وبعدها يتم تجاهله.
 """
 
 import sys
@@ -20,21 +28,18 @@ from telegram_reporter import send_cycle_report, send_error_alert
 
 def mark_db_record(url: str, title: str, status: str):
     """
-    تسجيل الحالات التي يجب حفظها فقط.
+    تسجيل حالة الخبر في قاعدة البيانات.
 
-    الأخبار التي تفشل أثناء المعالجة لا يتم تسجيلها،
-    وبالتالي تبقى قابلة لإعادة المحاولة في الدورة القادمة.
+    publish_failed:
+        فشل مؤقت، ويعاد محاولة الخبر في الدورات التالية
+        لمدة أقصاها 5 ساعات حسب منطق db.py.
+
+    published:
+        الخبر تمت معالجته ونشره بنجاح.
+
+    skipped_blocked_domain:
+        خبر تم تجاوزه نهائيًا بسبب نطاق ممنوع.
     """
-
-    # هذه الحالات لا تعتبر معالجة.
-    retry_statuses = {
-        "skipped_no_content",
-        "ai_failed",
-        "invalid_ai_result",
-    }
-
-    if status in retry_statuses:
-        return
 
     db.mark_processed(
         url=url,
@@ -116,14 +121,21 @@ def run_pipeline():
 
         try:
             extracted_data = extract_article(source_link)
+
         except Exception as e:
             print(
                 f"⚠️ حدث خطأ أثناء استخراج المقال: {e}"
             )
 
             print(
-                "🔄 لن يتم تسجيل الخبر، "
-                "وسيتم إعادة محاولته في الدورة القادمة."
+                "🔄 سيتم تسجيل الفشل وإعادة محاولة الخبر "
+                "في الدورة القادمة."
+            )
+
+            mark_db_record(
+                source_link,
+                source_title,
+                "publish_failed",
             )
 
             skipped_count += 1
@@ -134,7 +146,7 @@ def run_pipeline():
                 "🚫 تجاوز الخبر لأنه ينتمي إلى نطاق ممنوع."
             )
 
-            # هذا ليس فشل معالجة؛ لذلك يمنع إعادة المحاولة.
+            # هذا ليس فشل معالجة؛ لذلك لا تتم إعادة المحاولة.
             mark_db_record(
                 source_link,
                 source_title,
@@ -163,8 +175,14 @@ def run_pipeline():
             )
 
             print(
-                "🔄 لن يتم تسجيل الخبر، "
-                "وسيتم إعادة محاولته في الدورة القادمة."
+                "🔄 سيتم تسجيل الفشل وإعادة محاولة الخبر "
+                "في الدورة القادمة."
+            )
+
+            mark_db_record(
+                source_link,
+                source_title,
+                "publish_failed",
             )
 
             skipped_count += 1
@@ -180,14 +198,21 @@ def run_pipeline():
                 source_title,
                 matched_keyword,
             )
+
         except Exception as e:
             print(
                 f"⚠️ حدث خطأ أثناء معالجة Gemini: {e}"
             )
 
             print(
-                "🔄 لن يتم تسجيل الخبر، "
-                "وسيتم إعادة محاولته في الدورة القادمة."
+                "🔄 سيتم تسجيل الفشل وإعادة محاولة الخبر "
+                "في الدورة القادمة."
+            )
+
+            mark_db_record(
+                source_link,
+                source_title,
+                "publish_failed",
             )
 
             skipped_count += 1
@@ -202,8 +227,14 @@ def run_pipeline():
             )
 
             print(
-                "🔄 لن يتم تسجيل الخبر، "
-                "وسيتم إعادة محاولته في الدورة القادمة."
+                "🔄 سيتم تسجيل الفشل وإعادة محاولة الخبر "
+                "في الدورة القادمة."
+            )
+
+            mark_db_record(
+                source_link,
+                source_title,
+                "publish_failed",
             )
 
             skipped_count += 1
@@ -230,8 +261,14 @@ def run_pipeline():
             )
 
             print(
-                "🔄 لن يتم تسجيل الخبر، "
-                "وسيتم إعادة محاولته في الدورة القادمة."
+                "🔄 سيتم تسجيل الفشل وإعادة محاولة الخبر "
+                "في الدورة القادمة."
+            )
+
+            mark_db_record(
+                source_link,
+                source_title,
+                "publish_failed",
             )
 
             skipped_count += 1
@@ -256,14 +293,17 @@ def run_pipeline():
                 categories=categories_to_publish,
                 image_url=image_url,
             )
+
         except Exception as e:
             print(
                 f"❌ حدث خطأ أثناء النشر في WordPress: {e}"
             )
 
-            # نسجل publish_failed فقط.
-            # db.is_processed() يتجاهل هذه الحالة،
-            # وبالتالي سيعاد الخبر في الدورة القادمة.
+            print(
+                "🔄 سيتم تسجيل الفشل وإعادة محاولة الخبر "
+                "في الدورة القادمة."
+            )
+
             mark_db_record(
                 source_link,
                 source_title,
@@ -306,7 +346,8 @@ def run_pipeline():
             )
 
             print(
-                "🔄 سيتم إعادة محاولة الخبر في الدورة القادمة."
+                "🔄 سيتم تسجيل الفشل وإعادة محاولة الخبر "
+                "في الدورة القادمة."
             )
 
             mark_db_record(
