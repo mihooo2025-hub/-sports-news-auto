@@ -2,9 +2,11 @@
 rss_fetcher.py
 ==============
 يجلب أخبار كووورة مباشرة، مع Google News RSS كخطة احتياطية.
+
 - المصدر الأساسي: صفحات أخبار كووورة.
 - يفحص عدة صفحات من الأحدث إلى الأقدم.
-- يحتفظ بفلترة آخر 3 ساعات.
+- يلتزم بآخر 3 ساعات محسوبة من وقت بداية دورة التشغيل.
+- يمنع الأخبار التي لا يمكن تحديد وقت نشرها بدقة من الدخول إلى المعالجة.
 - يمنع التكرار عبر الرابط والعنوان في قاعدة البيانات.
 """
 
@@ -24,20 +26,77 @@ import db
 KOOORA_BASE = "https://www.kooora.com"
 KOOORA_NEWS = f"{KOOORA_BASE}/news"
 
+KOOORA_TIMEZONE = timezone(
+    timedelta(hours=3)
+)
 
-def _is_recent(entry, max_age_hours: int) -> bool:
-    published = entry.get("published_parsed") or entry.get("updated_parsed")
+ARABIC_MONTHS = {
+    "يناير": 1,
+    "فبراير": 2,
+    "مارس": 3,
+    "أبريل": 4,
+    "ابريل": 4,
+    "مايو": 5,
+    "يونيو": 6,
+    "يوليو": 7,
+    "أغسطس": 8,
+    "اغسطس": 8,
+    "سبتمبر": 9,
+    "أكتوبر": 10,
+    "اكتوبر": 10,
+    "نوفمبر": 11,
+    "ديسمبر": 12,
+}
 
-    if not published:
-        return True
+ARABIC_DIGITS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def _is_recent(
+    published_dt,
+    cycle_start: datetime,
+    max_age_hours: int,
+) -> bool:
+    """
+    التأكد من أن الخبر نُشر ضمن النافذة الزمنية المطلوبة.
+
+    الحد الأعلى:
+        وقت بداية الدورة.
+
+    الحد الأدنى:
+        وقت بداية الدورة ناقص 3 ساعات.
+
+    الأخبار التي لا تملك وقت نشر معروفًا لا تمر.
+    """
+
+    if not published_dt:
+        return False
 
     try:
-        published_dt = datetime(*published[:6], tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) - published_dt <= timedelta(
-            hours=max_age_hours
+        if published_dt.tzinfo is None:
+            published_dt = published_dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        published_dt = published_dt.astimezone(
+            timezone.utc
         )
+
+        cutoff = (
+            cycle_start
+            - timedelta(hours=max_age_hours)
+        )
+
+        return (
+            cutoff
+            <= published_dt
+            <= cycle_start
+        )
+
     except Exception:
-        return True
+        return False
 
 
 def _clean_title(title: str) -> str:
@@ -50,10 +109,17 @@ def _clean_title(title: str) -> str:
         if title.endswith(tag):
             title = title[:-len(tag)].strip()
 
-    return re.sub(r"\s+", " ", title).strip()
+    return re.sub(
+        r"\s+",
+        " ",
+        title,
+    ).strip()
 
 
-def _fetch_url(url: str, timeout: int = 20) -> bytes:
+def _fetch_url(
+    url: str,
+    timeout: int = 20,
+) -> bytes:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -67,9 +133,15 @@ def _fetch_url(url: str, timeout: int = 20) -> bytes:
         "Accept-Language": "ar,en-US;q=0.8,en;q=0.6",
     }
 
-    request = urllib.request.Request(url, headers=headers)
+    request = urllib.request.Request(
+        url,
+        headers=headers,
+    )
 
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(
+        request,
+        timeout=timeout,
+    ) as response:
         return response.read()
 
 
@@ -84,7 +156,11 @@ def _article_url(url: str) -> bool:
             return False
 
         path = parsed.path.rstrip("/")
-        parts = [p for p in path.split("/") if p]
+        parts = [
+            p
+            for p in path.split("/")
+            if p
+        ]
 
         if len(parts) < 2:
             return False
@@ -95,10 +171,16 @@ def _article_url(url: str) -> bool:
         if path in {"/news", "/news/"}:
             return False
 
-        if re.fullmatch(r"news/\d+", path.lstrip("/")):
+        if re.fullmatch(
+            r"news/\d+",
+            path.lstrip("/"),
+        ):
             return False
 
-        if re.fullmatch(r"\d+", last):
+        if re.fullmatch(
+            r"\d+",
+            last,
+        ):
             return True
 
         if last.startswith("blt"):
@@ -117,22 +199,127 @@ def _parse_datetime(value: str):
     value = value.strip()
 
     try:
-        value = value.replace("Z", "+00:00")
+        value = value.replace(
+            "Z",
+            "+00:00",
+        )
+
         dt = datetime.fromisoformat(value)
 
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
 
-        return dt.astimezone(timezone.utc)
+        return dt.astimezone(
+            timezone.utc
+        )
 
     except Exception:
         return None
 
 
+def _parse_visible_datetime(text: str):
+    """
+    استخراج التاريخ والوقت من النص الظاهر في بطاقة الخبر.
+
+    يدعم مثلًا:
+        09:46 20 أغسطس 2026
+        20 أغسطس 2026 09:46
+    """
+
+    if not text:
+        return None
+
+    text = (
+        str(text)
+        .translate(ARABIC_DIGITS)
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
+
+    month_pattern = (
+        r"(يناير|فبراير|مارس|أبريل|ابريل|مايو|"
+        r"يونيو|يوليو|أغسطس|اغسطس|سبتمبر|"
+        r"أكتوبر|اكتوبر|نوفمبر|ديسمبر)"
+    )
+
+    patterns = [
+        rf"(\d{{1,2}}):(\d{{2}})\s+"
+        rf"(\d{{1,2}})\s+{month_pattern}\s+(\d{{4}})",
+
+        rf"(\d{{1,2}})\s+{month_pattern}\s+"
+        rf"(\d{{4}})\s+(\d{{1,2}}):(\d{{2}})",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+        )
+
+        if not match:
+            continue
+
+        try:
+            groups = match.groups()
+
+            # الشكل الأول:
+            # HH:MM DD MONTH YYYY
+            if len(groups) == 5:
+                if ":" in match.group(0).split()[0]:
+                    hour = int(groups[0])
+                    minute = int(groups[1])
+                    day = int(groups[2])
+                    month_name = groups[3]
+                    year = int(groups[4])
+                else:
+                    day = int(groups[0])
+                    month_name = groups[1]
+                    year = int(groups[2])
+                    hour = int(groups[3])
+                    minute = int(groups[4])
+
+            else:
+                continue
+
+            month = ARABIC_MONTHS.get(
+                month_name
+            )
+
+            if not month:
+                continue
+
+            naive_dt = datetime(
+                year,
+                month,
+                day,
+                hour,
+                minute,
+            )
+
+            return naive_dt.replace(
+                tzinfo=KOOORA_TIMEZONE
+            ).astimezone(
+                timezone.utc
+            )
+
+        except Exception:
+            continue
+
+    return None
+
+
 def _extract_entry_time(anchor):
     """
-    يحاول العثور على وقت نشر الخبر من عناصر <time>
-    القريبة من رابط الخبر.
+    يحاول العثور على وقت نشر الخبر من:
+    1. عناصر <time>.
+    2. النص الظاهر في الرابط.
+    3. النص الظاهر في العناصر الأب القريبة.
     """
 
     node = anchor
@@ -147,7 +334,10 @@ def _extract_entry_time(anchor):
             value = (
                 time_tag.get("datetime")
                 or time_tag.get("content")
-                or time_tag.get_text(" ", strip=True)
+                or time_tag.get_text(
+                    " ",
+                    strip=True,
+                )
             )
 
             parsed = _parse_datetime(value)
@@ -157,64 +347,146 @@ def _extract_entry_time(anchor):
 
         node = node.parent
 
+    anchor_text = anchor.get_text(
+        " ",
+        strip=True,
+    )
+
+    parsed = _parse_visible_datetime(
+        anchor_text
+    )
+
+    if parsed:
+        return parsed
+
+    node = anchor
+
+    for _ in range(5):
+        if node is None:
+            break
+
+        text = node.get_text(
+            " ",
+            strip=True,
+        )
+
+        parsed = _parse_visible_datetime(
+            text
+        )
+
+        if parsed:
+            return parsed
+
+        node = node.parent
+
     return None
 
 
-def _parse_kooora_page(raw_data: bytes, source_name: str) -> list:
-    soup = BeautifulSoup(raw_data, "html.parser")
+def _parse_kooora_page(
+    raw_data: bytes,
+    source_name: str,
+) -> list:
+    soup = BeautifulSoup(
+        raw_data,
+        "html.parser",
+    )
 
     results = []
     seen = set()
 
-    for anchor in soup.find_all("a", href=True):
-        href = anchor.get("href", "").strip()
+    for anchor in soup.find_all(
+        "a",
+        href=True,
+    ):
+        href = anchor.get(
+            "href",
+            "",
+        ).strip()
 
         if not href:
             continue
 
-        link = urllib.parse.urljoin(KOOORA_BASE, href)
+        link = urllib.parse.urljoin(
+            KOOORA_BASE,
+            href,
+        )
 
         if not _article_url(link):
             continue
 
-        link = link.split("#", 1)[0]
+        link = link.split(
+            "#",
+            1,
+        )[0]
 
         if link in seen:
             continue
 
-        title = anchor.get_text(" ", strip=True)
-        title = html.unescape(title)
-        title = _clean_title(title)
+        title = anchor.get_text(
+            " ",
+            strip=True,
+        )
+
+        title = html.unescape(
+            title
+        )
+
+        title = _clean_title(
+            title
+        )
 
         if len(title) < 10:
             continue
 
+        published_dt = _extract_entry_time(
+            anchor
+        )
+
+        # لا نحول الخبر الذي لا نعرف
+        # وقت نشره إلى "الآن".
+        if not published_dt:
+            continue
+
         seen.add(link)
 
-        published_dt = _extract_entry_time(anchor)
-
-        results.append({
-            "title": title,
-            "link": link,
-            "published": published_dt.isoformat() if published_dt else "",
-            "published_dt": published_dt or datetime.now(timezone.utc),
-            "source": source_name,
-            "matched_keyword": source_name,
-        })
+        results.append(
+            {
+                "title": title,
+                "link": link,
+                "published": published_dt.isoformat(),
+                "published_dt": published_dt,
+                "source": source_name,
+                "matched_keyword": source_name,
+            }
+        )
 
     return results
 
 
-def _fetch_kooora_direct(max_age: int, pages: int) -> list:
+def _fetch_kooora_direct(
+    cycle_start: datetime,
+    max_age: int,
+    pages: int,
+) -> list:
     all_news = []
     seen_links = set()
     seen_titles = set()
 
-    for page in range(1, pages + 1):
-        url = KOOORA_NEWS if page == 1 else f"{KOOORA_NEWS}/{page}"
+    for page in range(
+        1,
+        pages + 1,
+    ):
+        url = (
+            KOOORA_NEWS
+            if page == 1
+            else f"{KOOORA_NEWS}/{page}"
+        )
 
         try:
-            raw_data = _fetch_url(url)
+            raw_data = _fetch_url(
+                url
+            )
+
             page_news = _parse_kooora_page(
                 raw_data,
                 "Kooora",
@@ -227,8 +499,6 @@ def _fetch_kooora_direct(max_age: int, pages: int) -> list:
                 if link in seen_links:
                     continue
 
-                # مطابقة العنوان 100% بعد تنظيف المسافات فقط.
-                # لا يوجد تشابه تقريبي حتى لا يتم فقد أخبار مختلفة.
                 normalized_title = re.sub(
                     r"\s+",
                     " ",
@@ -238,22 +508,24 @@ def _fetch_kooora_direct(max_age: int, pages: int) -> list:
                 if normalized_title in seen_titles:
                     continue
 
-                entry = {
-                    "published_parsed": (
-                        item["published_dt"].timetuple()
-                        if item.get("published_dt")
-                        else None
-                    )
-                }
-
-                if not _is_recent(entry, max_age):
+                if not _is_recent(
+                    item.get("published_dt"),
+                    cycle_start,
+                    max_age,
+                ):
                     continue
 
-                if db.is_processed(link, title):
+                if db.is_processed(
+                    link,
+                    title,
+                ):
                     continue
 
                 seen_links.add(link)
-                seen_titles.add(normalized_title)
+                seen_titles.add(
+                    normalized_title
+                )
+
                 all_news.append(item)
 
         except Exception as e:
@@ -264,8 +536,14 @@ def _fetch_kooora_direct(max_age: int, pages: int) -> list:
     return all_news
 
 
-def _fetch_google_news_fallback(max_age: int) -> list:
-    sources = CONFIG.get("rss_sources", [])
+def _fetch_google_news_fallback(
+    cycle_start: datetime,
+    max_age: int,
+) -> list:
+    sources = CONFIG.get(
+        "rss_sources",
+        [],
+    )
 
     all_news = []
     seen_links = set()
@@ -276,25 +554,41 @@ def _fetch_google_news_fallback(max_age: int) -> list:
             "name",
             "Google News Fallback",
         )
-        source_url = source.get("url")
+
+        source_url = source.get(
+            "url"
+        )
 
         if not source_url:
             continue
 
         try:
-            raw_data = _fetch_url(source_url)
-            feed = feedparser.parse(raw_data)
+            raw_data = _fetch_url(
+                source_url
+            )
+
+            feed = feedparser.parse(
+                raw_data
+            )
 
             for entry in feed.entries:
-                raw_title = entry.get("title", "").strip()
-                link = entry.get("link", "").strip()
+                raw_title = entry.get(
+                    "title",
+                    "",
+                ).strip()
+
+                link = entry.get(
+                    "link",
+                    "",
+                ).strip()
 
                 if not raw_title or not link:
                     continue
 
-                clean_title = _clean_title(raw_title)
+                clean_title = _clean_title(
+                    raw_title
+                )
 
-                # مطابقة العنوان 100% بعد التنظيف المحافظ.
                 normalized_title = re.sub(
                     r"\s+",
                     " ",
@@ -307,10 +601,10 @@ def _fetch_google_news_fallback(max_age: int) -> list:
                 if normalized_title in seen_titles:
                     continue
 
-                if db.is_processed(link, clean_title):
-                    continue
-
-                if not _is_recent(entry, max_age):
+                if db.is_processed(
+                    link,
+                    clean_title,
+                ):
                     continue
 
                 published_parsed = (
@@ -318,29 +612,42 @@ def _fetch_google_news_fallback(max_age: int) -> list:
                     or entry.get("updated_parsed")
                 )
 
-                published_dt = (
-                    datetime(
+                if not published_parsed:
+                    continue
+
+                try:
+                    published_dt = datetime(
                         *published_parsed[:6],
                         tzinfo=timezone.utc,
                     )
-                    if published_parsed
-                    else datetime.now(timezone.utc)
-                )
+                except Exception:
+                    continue
+
+                if not _is_recent(
+                    published_dt,
+                    cycle_start,
+                    max_age,
+                ):
+                    continue
 
                 seen_links.add(link)
-                seen_titles.add(normalized_title)
+                seen_titles.add(
+                    normalized_title
+                )
 
-                all_news.append({
-                    "title": clean_title,
-                    "link": link,
-                    "published": entry.get(
-                        "published",
-                        "",
-                    ),
-                    "published_dt": published_dt,
-                    "source": source_name,
-                    "matched_keyword": "Kooora",
-                })
+                all_news.append(
+                    {
+                        "title": clean_title,
+                        "link": link,
+                        "published": entry.get(
+                            "published",
+                            "",
+                        ),
+                        "published_dt": published_dt,
+                        "source": source_name,
+                        "matched_keyword": "Kooora",
+                    }
+                )
 
         except Exception as e:
             print(
@@ -350,48 +657,98 @@ def _fetch_google_news_fallback(max_age: int) -> list:
     return all_news
 
 
-def fetch_prioritized_news() -> list:
+def fetch_prioritized_news(
+    cycle_start: datetime | None = None,
+) -> list:
     settings = CONFIG.get(
         "fetch_settings",
         {},
     )
 
-    # فحص الأخبار يقتصر على آخر 3 ساعات.
     max_age = 3
+
+    if cycle_start is None:
+        cycle_start = datetime.now(
+            timezone.utc
+        )
+
+    if cycle_start.tzinfo is None:
+        cycle_start = cycle_start.replace(
+            tzinfo=timezone.utc
+        )
+
+    cycle_start = cycle_start.astimezone(
+        timezone.utc
+    )
+
+    cutoff = (
+        cycle_start
+        - timedelta(hours=max_age)
+    )
 
     pages = settings.get(
         "kooora_pages",
         3,
     )
 
-    print("🔎 محاولة جلب الأخبار مباشرة من كووورة...")
     print(
-        "⏱️ سيتم فحص الأخبار المنشورة خلال آخر 3 ساعات فقط."
+        "🔎 محاولة جلب الأخبار مباشرة من كووورة..."
+    )
+
+    print(
+        "⏱️ نافذة الفحص: آخر 3 ساعات "
+        "من وقت بدء الدورة."
+    )
+
+    print(
+        f"🕐 بداية الدورة: "
+        f"{cycle_start.isoformat()}"
+    )
+
+    print(
+        f"🕐 بداية النافذة: "
+        f"{cutoff.isoformat()}"
     )
 
     direct_news = _fetch_kooora_direct(
+        cycle_start,
         max_age,
         pages,
     )
 
-    # إذا نجح الجلب المباشر، نعتمد عليه.
     if direct_news:
         all_news = direct_news
+
         print(
             f"✅ تم العثور على {len(direct_news)} "
-            "خبرًا من كووورة مباشرة."
+            "خبرًا من كووورة مباشرة ضمن النافذة الزمنية."
         )
+
     else:
         print(
-            "⚠️ لم يتم الحصول على أخبار مباشرة من كووورة."
+            "⚠️ لم يتم الحصول على أخبار مباشرة "
+            "ضمن النافذة الزمنية من كووورة."
         )
+
         print(
-            "🔄 الانتقال إلى Google News كخطة احتياطية..."
+            "🔄 الانتقال إلى Google News "
+            "كخطة احتياطية..."
         )
 
         all_news = _fetch_google_news_fallback(
+            cycle_start,
             max_age,
         )
+
+    all_news = [
+        news
+        for news in all_news
+        if _is_recent(
+            news.get("published_dt"),
+            cycle_start,
+            max_age,
+        )
+    ]
 
     all_news.sort(
         key=lambda x: x["published_dt"],
@@ -399,6 +756,9 @@ def fetch_prioritized_news() -> list:
     )
 
     for news in all_news:
-        news.pop("published_dt", None)
+        news.pop(
+            "published_dt",
+            None,
+        )
 
     return all_news
