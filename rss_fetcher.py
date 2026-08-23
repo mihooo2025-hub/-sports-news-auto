@@ -27,7 +27,9 @@ KOOORA_BASE = "https://www.kooora.com"
 # رابط صفحة الأخبار الصحيح على كووورة (المسار العربي "/أخبار").
 # الرابط القديم "/news" غير صحيح ولا يعيد أي مقالات فعلية،
 # وهو السبب الرئيسي في ضعف عدد الأخبار المجلوبة سابقًا.
-KOOORA_NEWS = f"{KOOORA_BASE}/أخبار"
+# يجب ترميز الجزء العربي (URL-encode) وإلا يفشل urllib بخطأ
+# "'ascii' codec can't encode characters" عند بناء الطلب.
+KOOORA_NEWS = f"{KOOORA_BASE}/{urllib.parse.quote('أخبار')}"
 
 KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
