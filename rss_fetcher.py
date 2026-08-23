@@ -439,19 +439,10 @@ def _parse_kooora_page(
     results = []
     seen = set()
 
-    # عدادات تشخيصية لمعرفة أين تُستبعد الروابط
-    total_anchors = 0
-    matched_article_urls = 0
-    matched_after_dedup = 0
-    matched_title_ok = 0
-    matched_with_date = 0
-
     for anchor in soup.find_all(
         "a",
         href=True,
     ):
-        total_anchors += 1
-
         href = anchor.get(
             "href",
             "",
@@ -468,8 +459,6 @@ def _parse_kooora_page(
         if not _article_url(link):
             continue
 
-        matched_article_urls += 1
-
         link = link.split(
             "#",
             1,
@@ -477,8 +466,6 @@ def _parse_kooora_page(
 
         if link in seen:
             continue
-
-        matched_after_dedup += 1
 
         title = anchor.get_text(
             " ",
@@ -496,8 +483,6 @@ def _parse_kooora_page(
         if len(title) < 10:
             continue
 
-        matched_title_ok += 1
-
         published_dt = _extract_entry_time(
             anchor
         )
@@ -506,8 +491,6 @@ def _parse_kooora_page(
         # وقت نشره إلى "الآن".
         if not published_dt:
             continue
-
-        matched_with_date += 1
 
         seen.add(link)
 
@@ -521,14 +504,6 @@ def _parse_kooora_page(
                 "matched_keyword": source_name,
             }
         )
-
-    print(
-        f"    🧪 تشخيص الصفحة: إجمالي الروابط={total_anchors} | "
-        f"روابط مقالات={matched_article_urls} | "
-        f"بعد إزالة التكرار={matched_after_dedup} | "
-        f"عنوان صالح={matched_title_ok} | "
-        f"مع تاريخ نشر معروف={matched_with_date}"
-    )
 
     return results
 
@@ -557,24 +532,10 @@ def _fetch_kooora_direct(
                 url
             )
 
-            print(
-                f"  📄 صفحة {page}: تم جلب "
-                f"{len(raw_data)} بايت من {url}"
-            )
-
             page_news = _parse_kooora_page(
                 raw_data,
                 "Kooora",
             )
-
-            print(
-                f"  📄 صفحة {page}: استخرجت "
-                f"{len(page_news)} خبرًا (قبل فلترة الوقت/قاعدة البيانات)"
-            )
-
-            page_dropped_recency = 0
-            page_dropped_db = 0
-            debug_samples_shown = 0
 
             for item in page_news:
                 link = item["link"]
@@ -597,24 +558,12 @@ def _fetch_kooora_direct(
                     cycle_start,
                     max_age,
                 ):
-                    page_dropped_recency += 1
-
-                    if debug_samples_shown < 5:
-                        debug_samples_shown += 1
-                        print(
-                            f"    ⛔ مستبعد بسبب الوقت | العنوان: "
-                            f"{item.get('title', '')[:40]} | "
-                            f"published (خام)={item.get('published')} | "
-                            f"published_dt (UTC)={item.get('published_dt')}"
-                        )
-
                     continue
 
                 if db.is_processed(
                     link,
                     title,
                 ):
-                    page_dropped_db += 1
                     continue
 
                 seen_links.add(link)
@@ -623,12 +572,6 @@ def _fetch_kooora_direct(
                 )
 
                 all_news.append(item)
-
-            print(
-                f"  📄 صفحة {page}: استُبعد بسبب نافذة الوقت="
-                f"{page_dropped_recency} | استُبعد لأنه منشور سابقًا="
-                f"{page_dropped_db}"
-            )
 
         except Exception as e:
             print(
