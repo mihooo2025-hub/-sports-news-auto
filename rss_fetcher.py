@@ -574,6 +574,7 @@ def _fetch_kooora_direct(
 
             page_dropped_recency = 0
             page_dropped_db = 0
+            debug_samples_shown = 0
 
             for item in page_news:
                 link = item["link"]
@@ -597,6 +598,16 @@ def _fetch_kooora_direct(
                     max_age,
                 ):
                     page_dropped_recency += 1
+
+                    if debug_samples_shown < 5:
+                        debug_samples_shown += 1
+                        print(
+                            f"    ⛔ مستبعد بسبب الوقت | العنوان: "
+                            f"{item.get('title', '')[:40]} | "
+                            f"published (خام)={item.get('published')} | "
+                            f"published_dt (UTC)={item.get('published_dt')}"
+                        )
+
                     continue
 
                 if db.is_processed(
