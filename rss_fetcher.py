@@ -1,34 +1,64 @@
 """
 rss_fetcher.py
 ==============
-يجلب أخبار كووورة مباشرة، مع Google News RSS كخطة احتياطية.
+جلب أخبار كووورة مباشرة.
 
-- المصدر الأساسي: صفحات أخبار كووورة.
-- يفحص عدة صفحات من الأحدث إلى الأقدم.
-- يلتزم بآخر 3 ساعات محسوبة من وقت بداية دورة التشغيل.
-- يمنع الأخبار التي لا يمكن تحديد وقت نشرها بدقة من الدخول إلى المعالجة.
-- يمنع التكرار عبر الرابط والعنوان في قاعدة البيانات.
+لا يعتمد على Google News ولا على RSS خارجي.
+
+يتم:
+- جلب صفحة أخبار كووورة مباشرة.
+- استخراج روابط المقالات الحالية.
+- استخراج وقت النشر من بطاقة الخبر.
+- مقارنة الوقت مع آخر 6 ساعات من بداية الدورة.
+- منع روابط القوائم والمقالات التحليلية.
+- محاولة استخدام الصفحة التالية عند الحاجة.
 """
 
-import html
+from __future__ import annotations
+
 import re
-import urllib.parse
-import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Iterable
+from urllib.parse import unquote, urljoin, urlparse
 
-import feedparser
-from bs4 import BeautifulSoup
-
-from config import CONFIG
-import db
+import requests
+from bs4 import BeautifulSoup, Tag
 
 
-KOOORA_BASE = "https://www.kooora.com"
-KOOORA_NEWS = f"{KOOORA_BASE}/news"
+# =========================================================
+# Kooora
+# =========================================================
 
-KOOORA_TIMEZONE = timezone(
+BASE_URL = "https://www.kooora.com"
+NEWS_URL = f"{BASE_URL}/أخبار"
+
+LOOKBACK_HOURS = 6
+
+SOURCE_TZ = timezone(
     timedelta(hours=3)
 )
+
+REQUEST_TIMEOUT = 30
+
+MAX_PAGES = 10
+
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/138.0.0.0 Safari/537.36"
+)
+
+
+# =========================================================
+# Arabic dates
+# =========================================================
+
+ARABIC_DIGITS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩",
+    "0123456789",
+)
+
 
 ARABIC_MONTHS = {
     "يناير": 1,
@@ -48,192 +78,832 @@ ARABIC_MONTHS = {
     "ديسمبر": 12,
 }
 
-ARABIC_DIGITS = str.maketrans(
-    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
-    "01234567890123456789",
+
+MONTH_PATTERN = "|".join(
+    re.escape(month)
+    for month in ARABIC_MONTHS
 )
 
 
-def _is_recent(
-    published_dt,
-    cycle_start: datetime,
-    max_age_hours: int,
-) -> bool:
-    """
-    التأكد من أن الخبر نُشر ضمن النافذة الزمنية المطلوبة.
+# =========================================================
+# Session
+# =========================================================
 
-    الحد الأعلى:
-        وقت بداية الدورة.
+SESSION = requests.Session()
 
-    الحد الأدنى:
-        وقت بداية الدورة ناقص 3 ساعات.
-
-    الأخبار التي لا تملك وقت نشر معروفًا لا تمر.
-    """
-
-    if not published_dt:
-        return False
-
-    try:
-        if published_dt.tzinfo is None:
-            published_dt = published_dt.replace(
-                tzinfo=timezone.utc
-            )
-
-        published_dt = published_dt.astimezone(
-            timezone.utc
-        )
-
-        cutoff = (
-            cycle_start
-            - timedelta(hours=max_age_hours)
-        )
-
-        return (
-            cutoff
-            <= published_dt
-            <= cycle_start
-        )
-
-    except Exception:
-        return False
-
-
-def _clean_title(title: str) -> str:
-    for tag in [
-        " - كووورة",
-        " - كوووره",
-        " - Kooora",
-        " - kooora",
-    ]:
-        if title.endswith(tag):
-            title = title[:-len(tag)].strip()
-
-    return re.sub(
-        r"\s+",
-        " ",
-        title,
-    ).strip()
-
-
-def _fetch_url(
-    url: str,
-    timeout: int = 20,
-) -> bytes:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
+SESSION.headers.update(
+    {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": (
+            "ar-SA,ar;q=0.9,en-US;q=0.8,en;q=0.7"
         ),
         "Accept": (
-            "text/html,application/xhtml+xml,application/xml;"
-            "q=0.9,image/avif,image/webp,*/*;q=0.8"
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
         ),
-        "Accept-Language": "ar,en-US;q=0.8,en;q=0.6",
+        "Referer": BASE_URL + "/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
+)
 
-    request = urllib.request.Request(
-        url,
-        headers=headers,
+
+# =========================================================
+# Text
+# =========================================================
+
+def _clean_text(
+    text: str,
+) -> str:
+    text = str(
+        text or ""
     )
 
-    with urllib.request.urlopen(
-        request,
-        timeout=timeout,
-    ) as response:
-        return response.read()
+    text = text.replace(
+        "\u00a0",
+        " ",
+    )
+
+    text = text.replace(
+        "\r",
+        " ",
+    )
+
+    text = text.replace(
+        "\n",
+        " ",
+    )
+
+    text = text.replace(
+        "\t",
+        " ",
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    return text.strip()
 
 
-def _article_url(url: str) -> bool:
+def _normalize_digits(
+    text: str,
+) -> str:
+    return (
+        text or ""
+    ).translate(
+        ARABIC_DIGITS
+    )
+
+
+# =========================================================
+# URL
+# =========================================================
+
+def _canonical_url(
+    url: str,
+) -> str:
+
+    url = urljoin(
+        BASE_URL + "/",
+        url,
+    )
+
+    parsed = urlparse(
+        url
+    )
+
+    host = (
+        parsed.netloc
+        or ""
+    ).lower()
+
+    if host in {
+        "kooora.com",
+        "www.kooora.com",
+    }:
+        host = "www.kooora.com"
+
+    path = unquote(
+        parsed.path
+        or "/"
+    )
+
+    path = re.sub(
+        r"/{2,}",
+        "/",
+        path,
+    )
+
+    path = (
+        path.rstrip("/")
+        or "/"
+    )
+
+    return parsed._replace(
+        netloc=host,
+        path=path,
+        query="",
+        fragment="",
+    ).geturl()
+
+
+# =========================================================
+# Article URL
+# =========================================================
+
+def _is_article_url(
+    url: str,
+) -> bool:
+
+    parsed = urlparse(
+        url
+    )
+
+    host = (
+        parsed.netloc
+        or ""
+    ).lower()
+
+    if host not in {
+        "",
+        "kooora.com",
+        "www.kooora.com",
+    }:
+        return False
+
+    path = unquote(
+        parsed.path
+        or "/"
+    ).lower()
+
+    if path in {
+        "/",
+        "/أخبار",
+        "/news",
+    }:
+        return False
+
+    # Current Kooora article identifiers.
+    if not re.search(
+        r"/blt[a-z0-9_-]+/?$",
+        path,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    # Do not collect list/article-analysis pages.
+    if any(
+        section in path
+        for section in (
+            "/القوائم/",
+            "/القوائم",
+            "/lists/",
+            "/list/",
+        )
+    ):
+        return False
+
+    return (
+        "/أخبار/" in path
+        or "/news/" in path
+    )
+
+
+# =========================================================
+# Date parser
+# =========================================================
+
+def _build_source_datetime(
+    day: int,
+    month: int,
+    year: int,
+    hour: int,
+    minute: int,
+) -> datetime | None:
+
     try:
-        parsed = urllib.parse.urlparse(url)
+        return datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            tzinfo=SOURCE_TZ,
+        )
 
-        if parsed.netloc.lower() not in {
-            "kooora.com",
-            "www.kooora.com",
-        }:
-            return False
-
-        path = parsed.path.rstrip("/")
-        parts = [
-            p
-            for p in path.split("/")
-            if p
-        ]
-
-        if len(parts) < 2:
-            return False
-
-        last = parts[-1]
-
-        # صفحات الأخبار نفسها ليست مقالات.
-        if path in {"/news", "/news/"}:
-            return False
-
-        if re.fullmatch(
-            r"news/\d+",
-            path.lstrip("/"),
-        ):
-            return False
-
-        if re.fullmatch(
-            r"\d+",
-            last,
-        ):
-            return True
-
-        if last.startswith("blt"):
-            return True
-
-        return False
-
-    except Exception:
-        return False
-
-
-def _parse_datetime(value: str):
-    if not value:
+    except ValueError:
         return None
 
-    value = value.strip()
+
+def _parse_datetime(
+    text: str,
+) -> datetime | None:
+
+    raw = _normalize_digits(
+        text
+    )
+
+    raw = _clean_text(
+        raw
+    )
+
+    if not raw:
+        return None
+
+    # -----------------------------------------------------
+    # ISO timestamps
+    # -----------------------------------------------------
 
     try:
-        value = value.replace(
+
+        candidate = raw.replace(
             "Z",
             "+00:00",
         )
 
-        dt = datetime.fromisoformat(value)
+        if re.search(
+            r"\d{4}-\d{2}-\d{2}",
+            candidate,
+        ):
 
-        if dt.tzinfo is None:
-            dt = dt.replace(
-                tzinfo=timezone.utc
+            dt = datetime.fromisoformat(
+                candidate
             )
 
-        return dt.astimezone(
-            timezone.utc
+            if dt.tzinfo is None:
+                dt = dt.replace(
+                    tzinfo=SOURCE_TZ
+                )
+
+            return dt.astimezone(
+                SOURCE_TZ
+            )
+
+    except ValueError:
+        pass
+
+    # -----------------------------------------------------
+    # Arabic date + time
+    #
+    # Example:
+    # 03:40 23 أغسطس 2026
+    # -----------------------------------------------------
+
+    patterns = [
+        rf"(\d{{1,2}})\s*[:٫.]\s*(\d{{2}})\s*(\d{{1,2}})\s+({MONTH_PATTERN})\s+(20\d{{2}})(?!\d)",
+
+        rf"(\d{{1,2}})\s+({MONTH_PATTERN})\s+(20\d{{2}})\s*(\d{{1,2}})\s*[:٫.]\s*(\d{{2}})(?!\d)",
+    ]
+
+    matches = []
+
+    for pattern_index, pattern in enumerate(
+        patterns
+    ):
+
+        for match in re.finditer(
+            pattern,
+            raw,
+            flags=re.IGNORECASE,
+        ):
+
+            matches.append(
+                (
+                    pattern_index,
+                    match,
+                )
+            )
+
+    if matches:
+
+        pattern_index, match = max(
+            matches,
+            key=lambda item: item[1].start(),
         )
 
-    except Exception:
-        return None
+        if pattern_index == 0:
+
+            hour = int(
+                match.group(1)
+            )
+
+            minute = int(
+                match.group(2)
+            )
+
+            day = int(
+                match.group(3)
+            )
+
+            month_name = match.group(4)
+
+            year = int(
+                match.group(5)
+            )
+
+        else:
+
+            day = int(
+                match.group(1)
+            )
+
+            month_name = match.group(2)
+
+            year = int(
+                match.group(3)
+            )
+
+            hour = int(
+                match.group(4)
+            )
+
+            minute = int(
+                match.group(5)
+            )
+
+        month = ARABIC_MONTHS.get(
+            month_name
+        )
+
+        if month is None:
+
+            month = ARABIC_MONTHS.get(
+                month_name.replace(
+                    "ا",
+                    "أ",
+                )
+            )
+
+        if month is not None:
+
+            return _build_source_datetime(
+                day=day,
+                month=month,
+                year=year,
+                hour=hour,
+                minute=minute,
+            )
+
+    # -----------------------------------------------------
+    # Numeric dates
+    # -----------------------------------------------------
+
+    numeric = re.search(
+        r"(\d{1,2})\s*[:٫.]\s*(\d{2})\s+"
+        r"(\d{1,2})[/-](\d{1,2})[/-](20\d{2})",
+        raw,
+    )
+
+    if numeric:
+
+        return _build_source_datetime(
+            day=int(
+                numeric.group(3)
+            ),
+            month=int(
+                numeric.group(4)
+            ),
+            year=int(
+                numeric.group(5)
+            ),
+            hour=int(
+                numeric.group(1)
+            ),
+            minute=int(
+                numeric.group(2)
+            ),
+        )
+
+    numeric_reverse = re.search(
+        r"(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\s+"
+        r"(\d{1,2})\s*[:٫.]\s*(\d{2})",
+        raw,
+    )
+
+    if numeric_reverse:
+
+        return _build_source_datetime(
+            day=int(
+                numeric_reverse.group(1)
+            ),
+            month=int(
+                numeric_reverse.group(2)
+            ),
+            year=int(
+                numeric_reverse.group(3)
+            ),
+            hour=int(
+                numeric_reverse.group(4)
+            ),
+            minute=int(
+                numeric_reverse.group(5)
+            ),
+        )
+
+    return None
 
 
-def _parse_visible_datetime(text: str):
-    """
-    استخراج التاريخ والوقت من النص الظاهر في بطاقة الخبر.
+# =========================================================
+# Metadata date
+# =========================================================
 
-    يدعم مثلًا:
-        09:46 20 أغسطس 2026
-        20 أغسطس 2026 09:46
-    """
+def _first_meta(
+    soup: BeautifulSoup,
+    names: Iterable[str],
+) -> str | None:
 
-    if not text:
-        return None
+    for name in names:
 
-    text = (
-        str(text)
-        .translate(ARABIC_DIGITS)
+        tag = (
+            soup.find(
+                "meta",
+                attrs={
+                    "property": name
+                },
+            )
+            or soup.find(
+                "meta",
+                attrs={
+                    "name": name
+                },
+            )
+        )
+
+        if (
+            tag
+            and tag.get(
+                "content"
+            )
+        ):
+
+            return tag.get(
+                "content"
+            ).strip()
+
+    return None
+
+
+def _extract_json_ld_dates(
+    soup: BeautifulSoup,
+) -> list[str]:
+
+    values = []
+
+    for script in soup.find_all(
+        "script",
+        type="application/ld+json",
+    ):
+
+        raw = (
+            script.string
+            or script.get_text()
+        )
+
+        if not raw:
+            continue
+
+        try:
+            import json
+
+            data = json.loads(
+                raw
+            )
+
+        except Exception:
+            continue
+
+        blocks = []
+
+        if isinstance(
+            data,
+            dict,
+        ):
+
+            blocks.append(
+                data
+            )
+
+            graph = data.get(
+                "@graph"
+            )
+
+            if isinstance(
+                graph,
+                list,
+            ):
+
+                blocks.extend(
+                    item
+                    for item in graph
+                    if isinstance(
+                        item,
+                        dict,
+                    )
+                )
+
+        elif isinstance(
+            data,
+            list,
+        ):
+
+            blocks.extend(
+                item
+                for item in data
+                if isinstance(
+                    item,
+                    dict,
+                )
+            )
+
+        for block in blocks:
+
+            for key in (
+                "datePublished",
+                "dateCreated",
+                "dateModified",
+            ):
+
+                value = block.get(
+                    key
+                )
+
+                if isinstance(
+                    value,
+                    str,
+                ):
+
+                    values.append(
+                        value
+                    )
+
+    return values
+
+
+# =========================================================
+# HTTP
+# =========================================================
+
+def _get(
+    url: str,
+) -> requests.Response:
+
+    response = SESSION.get(
+        url,
+        timeout=REQUEST_TIMEOUT,
+        allow_redirects=True,
+    )
+
+    response.raise_for_status()
+
+    if not response.encoding:
+        response.encoding = (
+            response.apparent_encoding
+            or "utf-8"
+        )
+
+    return response
+
+
+# =========================================================
+# Candidate date
+# =========================================================
+
+def _find_card_date(
+    node: Tag,
+) -> datetime | None:
+
+    # First: exact anchor text.
+    exact_text = _clean_text(
+        node.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    dt = _parse_datetime(
+        exact_text
+    )
+
+    if dt:
+        return dt
+
+    # Attributes.
+    for attr in (
+        "datetime",
+        "data-datetime",
+        "data-published",
+        "data-publish-date",
+        "data-date",
+        "data-time",
+        "title",
+        "aria-label",
+    ):
+
+        value = node.get(
+            attr
+        )
+
+        if not value:
+            continue
+
+        dt = _parse_datetime(
+            value
+        )
+
+        if dt:
+            return dt
+
+    # Small parent only.
+    current = node
+
+    for _ in range(3):
+
+        parent = (
+            current.parent
+            if isinstance(
+                current.parent,
+                Tag,
+            )
+            else None
+        )
+
+        if parent is None:
+            break
+
+        parent_text = _clean_text(
+            parent.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        if len(
+            parent_text
+        ) <= 1200:
+
+            dt = _parse_datetime(
+                parent_text
+            )
+
+            if dt:
+                return dt
+
+        for time_tag in parent.find_all(
+            "time"
+        )[:3]:
+
+            value = (
+                time_tag.get(
+                    "datetime"
+                )
+                or time_tag.get(
+                    "data-datetime"
+                )
+                or time_tag.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            dt = _parse_datetime(
+                value
+            )
+
+            if dt:
+                return dt
+
+        current = parent
+
+    return None
+
+
+# =========================================================
+# Article fallback date
+# =========================================================
+
+def _article_date(
+    url: str,
+) -> datetime | None:
+
+    try:
+
+        response = _get(
+            url
+        )
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+
+        for name in (
+            "article:published_time",
+            "datePublished",
+            "publication_date",
+            "date",
+        ):
+
+            value = _first_meta(
+                soup,
+                (name,),
+            )
+
+            if value:
+
+                dt = _parse_datetime(
+                    value
+                )
+
+                if dt:
+                    return dt
+
+        for value in _extract_json_ld_dates(
+            soup
+        ):
+
+            dt = _parse_datetime(
+                value
+            )
+
+            if dt:
+                return dt
+
+        for time_tag in soup.find_all(
+            "time"
+        ):
+
+            value = (
+                time_tag.get(
+                    "datetime"
+                )
+                or time_tag.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            dt = _parse_datetime(
+                value
+            )
+
+            if dt:
+                return dt
+
+    except Exception as exc:
+
+        print(
+            f"⚠️ فشل جلب تاريخ المقال: "
+            f"{url} -> {exc}"
+        )
+
+    return None
+
+
+# =========================================================
+# Title
+# =========================================================
+
+def _extract_title(
+    node: Tag,
+) -> str:
+
+    # Prefer accessible title attributes.
+    for attr in (
+        "title",
+        "aria-label",
+    ):
+
+        value = node.get(
+            attr
+        )
+
+        if value:
+
+            value = _clean_text(
+                value
+            )
+
+            if len(value) >= 10:
+
+                return value
+
+    text = _clean_text(
+        node.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    # Remove timestamp from end.
+    text = re.sub(
+        rf"\d{{1,2}}\s*[:٫.]\s*\d{{2}}\s+\d{{1,2}}\s+({MONTH_PATTERN})\s+20\d{{2}}",
+        "",
+        text,
+        flags=re.IGNORECASE,
     )
 
     text = re.sub(
@@ -242,523 +912,351 @@ def _parse_visible_datetime(text: str):
         text,
     ).strip()
 
-    month_pattern = (
-        r"(يناير|فبراير|مارس|أبريل|ابريل|مايو|"
-        r"يونيو|يوليو|أغسطس|اغسطس|سبتمبر|"
-        r"أكتوبر|اكتوبر|نوفمبر|ديسمبر)"
-    )
-
-    patterns = [
-        rf"(\d{{1,2}}):(\d{{2}})\s+"
-        rf"(\d{{1,2}})\s+{month_pattern}\s+(\d{{4}})",
-
-        rf"(\d{{1,2}})\s+{month_pattern}\s+"
-        rf"(\d{{4}})\s+(\d{{1,2}}):(\d{{2}})",
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-        )
-
-        if not match:
-            continue
-
-        try:
-            groups = match.groups()
-
-            # الشكل الأول:
-            # HH:MM DD MONTH YYYY
-            if len(groups) == 5:
-                if ":" in match.group(0).split()[0]:
-                    hour = int(groups[0])
-                    minute = int(groups[1])
-                    day = int(groups[2])
-                    month_name = groups[3]
-                    year = int(groups[4])
-                else:
-                    day = int(groups[0])
-                    month_name = groups[1]
-                    year = int(groups[2])
-                    hour = int(groups[3])
-                    minute = int(groups[4])
-
-            else:
-                continue
-
-            month = ARABIC_MONTHS.get(
-                month_name
-            )
-
-            if not month:
-                continue
-
-            naive_dt = datetime(
-                year,
-                month,
-                day,
-                hour,
-                minute,
-            )
-
-            return naive_dt.replace(
-                tzinfo=KOOORA_TIMEZONE
-            ).astimezone(
-                timezone.utc
-            )
-
-        except Exception:
-            continue
-
-    return None
+    return text
 
 
-def _extract_entry_time(anchor):
-    """
-    يحاول العثور على وقت نشر الخبر من:
-    1. عناصر <time>.
-    2. النص الظاهر في الرابط.
-    3. النص الظاهر في العناصر الأب القريبة.
-    """
+# =========================================================
+# Pagination
+# =========================================================
 
-    node = anchor
+def _find_next_page(
+    soup: BeautifulSoup,
+    current_url: str,
+) -> str | None:
 
-    for _ in range(7):
-        if node is None:
-            break
-
-        time_tag = node.find("time")
-
-        if time_tag:
-            value = (
-                time_tag.get("datetime")
-                or time_tag.get("content")
-                or time_tag.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
-
-            parsed = _parse_datetime(value)
-
-            if parsed:
-                return parsed
-
-        node = node.parent
-
-    anchor_text = anchor.get_text(
-        " ",
-        strip=True,
-    )
-
-    parsed = _parse_visible_datetime(
-        anchor_text
-    )
-
-    if parsed:
-        return parsed
-
-    node = anchor
-
-    for _ in range(5):
-        if node is None:
-            break
-
-        text = node.get_text(
-            " ",
-            strip=True,
-        )
-
-        parsed = _parse_visible_datetime(
-            text
-        )
-
-        if parsed:
-            return parsed
-
-        node = node.parent
-
-    return None
-
-
-def _parse_kooora_page(
-    raw_data: bytes,
-    source_name: str,
-) -> list:
-    soup = BeautifulSoup(
-        raw_data,
-        "html.parser",
-    )
-
-    results = []
-    seen = set()
-
-    for anchor in soup.find_all(
+    for a in soup.find_all(
         "a",
         href=True,
     ):
-        href = anchor.get(
-            "href",
-            "",
-        ).strip()
 
-        if not href:
-            continue
+        text = _clean_text(
+            a.get_text(
+                " ",
+                strip=True,
+            )
+        ).lower()
 
-        link = urllib.parse.urljoin(
-            KOOORA_BASE,
-            href,
-        )
-
-        if not _article_url(link):
-            continue
-
-        link = link.split(
-            "#",
-            1,
-        )[0]
-
-        if link in seen:
-            continue
-
-        title = anchor.get_text(
-            " ",
-            strip=True,
-        )
-
-        title = html.unescape(
-            title
-        )
-
-        title = _clean_title(
-            title
-        )
-
-        if len(title) < 10:
-            continue
-
-        published_dt = _extract_entry_time(
-            anchor
-        )
-
-        # لا نحول الخبر الذي لا نعرف
-        # وقت نشره إلى "الآن".
-        if not published_dt:
-            continue
-
-        seen.add(link)
-
-        results.append(
-            {
-                "title": title,
-                "link": link,
-                "published": published_dt.isoformat(),
-                "published_dt": published_dt,
-                "source": source_name,
-                "matched_keyword": source_name,
+        if (
+            text in {
+                "أقدم",
+                "الأقدم",
+                "التالي",
+                "الصفحة التالية",
+                "next",
+                "older",
             }
-        )
+            or "أقدم" in text
+        ):
 
-    return results
-
-
-def _fetch_kooora_direct(
-    cycle_start: datetime,
-    max_age: int,
-    pages: int,
-) -> list:
-    all_news = []
-    seen_links = set()
-    seen_titles = set()
-
-    for page in range(
-        1,
-        pages + 1,
-    ):
-        url = (
-            KOOORA_NEWS
-            if page == 1
-            else f"{KOOORA_NEWS}/{page}"
-        )
-
-        try:
-            raw_data = _fetch_url(
-                url
+            target = urljoin(
+                current_url,
+                a.get(
+                    "href"
+                ),
             )
 
-            page_news = _parse_kooora_page(
-                raw_data,
-                "Kooora",
+            target = _canonical_url(
+                target
             )
 
-            for item in page_news:
-                link = item["link"]
-                title = item["title"]
+            if target != _canonical_url(
+                current_url
+            ):
 
-                if link in seen_links:
-                    continue
+                return target
 
-                normalized_title = re.sub(
-                    r"\s+",
-                    " ",
-                    title.strip(),
-                ).lower()
-
-                if normalized_title in seen_titles:
-                    continue
-
-                if not _is_recent(
-                    item.get("published_dt"),
-                    cycle_start,
-                    max_age,
-                ):
-                    continue
-
-                if db.is_processed(
-                    link,
-                    title,
-                ):
-                    continue
-
-                seen_links.add(link)
-                seen_titles.add(
-                    normalized_title
-                )
-
-                all_news.append(item)
-
-        except Exception as e:
-            print(
-                f"⚠️ تعذر جلب صفحة كووورة رقم {page}: {e}"
-            )
-
-    return all_news
+    return None
 
 
-def _fetch_google_news_fallback(
-    cycle_start: datetime,
-    max_age: int,
-) -> list:
-    sources = CONFIG.get(
-        "rss_sources",
-        [],
-    )
-
-    all_news = []
-    seen_links = set()
-    seen_titles = set()
-
-    for source in sources:
-        source_name = source.get(
-            "name",
-            "Google News Fallback",
-        )
-
-        source_url = source.get(
-            "url"
-        )
-
-        if not source_url:
-            continue
-
-        try:
-            raw_data = _fetch_url(
-                source_url
-            )
-
-            feed = feedparser.parse(
-                raw_data
-            )
-
-            for entry in feed.entries:
-                raw_title = entry.get(
-                    "title",
-                    "",
-                ).strip()
-
-                link = entry.get(
-                    "link",
-                    "",
-                ).strip()
-
-                if not raw_title or not link:
-                    continue
-
-                clean_title = _clean_title(
-                    raw_title
-                )
-
-                normalized_title = re.sub(
-                    r"\s+",
-                    " ",
-                    clean_title.strip(),
-                ).lower()
-
-                if link in seen_links:
-                    continue
-
-                if normalized_title in seen_titles:
-                    continue
-
-                if db.is_processed(
-                    link,
-                    clean_title,
-                ):
-                    continue
-
-                published_parsed = (
-                    entry.get("published_parsed")
-                    or entry.get("updated_parsed")
-                )
-
-                if not published_parsed:
-                    continue
-
-                try:
-                    published_dt = datetime(
-                        *published_parsed[:6],
-                        tzinfo=timezone.utc,
-                    )
-                except Exception:
-                    continue
-
-                if not _is_recent(
-                    published_dt,
-                    cycle_start,
-                    max_age,
-                ):
-                    continue
-
-                seen_links.add(link)
-                seen_titles.add(
-                    normalized_title
-                )
-
-                all_news.append(
-                    {
-                        "title": clean_title,
-                        "link": link,
-                        "published": entry.get(
-                            "published",
-                            "",
-                        ),
-                        "published_dt": published_dt,
-                        "source": source_name,
-                        "matched_keyword": "Kooora",
-                    }
-                )
-
-        except Exception as e:
-            print(
-                f"⚠️ فشل Google News fallback: {e}"
-            )
-
-    return all_news
-
+# =========================================================
+# Main function
+# =========================================================
 
 def fetch_prioritized_news(
-    cycle_start: datetime | None = None,
-) -> list:
-    settings = CONFIG.get(
-        "fetch_settings",
-        {},
-    )
-
-    max_age = 3
-
-    if cycle_start is None:
-        cycle_start = datetime.now(
-            timezone.utc
-        )
-
-    if cycle_start.tzinfo is None:
-        cycle_start = cycle_start.replace(
-            tzinfo=timezone.utc
-        )
-
-    cycle_start = cycle_start.astimezone(
-        timezone.utc
-    )
-
-    cutoff = (
-        cycle_start
-        - timedelta(hours=max_age)
-    )
-
-    pages = settings.get(
-        "kooora_pages",
-        3,
-    )
+    cycle_start: datetime,
+) -> list[dict]:
 
     print(
         "🔎 محاولة جلب الأخبار مباشرة من كووورة..."
     )
 
     print(
-        "⏱️ نافذة الفحص: آخر 3 ساعات "
-        "من وقت بدء الدورة."
+        "⏱️ نافذة الفحص: آخر 6 ساعات من وقت بدء الدورة."
+    )
+
+    if cycle_start.tzinfo is None:
+
+        cycle_start = cycle_start.replace(
+            tzinfo=timezone.utc
+        )
+
+    # Convert cycle time to Kooora/Saudi timezone.
+    cycle_start_source = cycle_start.astimezone(
+        SOURCE_TZ
+    )
+
+    cutoff_source = (
+        cycle_start_source
+        - timedelta(
+            hours=LOOKBACK_HOURS
+        )
     )
 
     print(
-        f"🕐 بداية الدورة: "
+        f"🕐 بداية الدورة UTC: "
         f"{cycle_start.isoformat()}"
     )
 
     print(
+        f"🕐 بداية الدورة بتوقيت كووورة: "
+        f"{cycle_start_source.isoformat()}"
+    )
+
+    print(
         f"🕐 بداية النافذة: "
-        f"{cutoff.isoformat()}"
+        f"{cutoff_source.isoformat()}"
     )
 
-    direct_news = _fetch_kooora_direct(
-        cycle_start,
-        max_age,
-        pages,
+    results = []
+
+    seen_urls = set()
+
+    current_url = NEWS_URL
+
+    for page_number in range(
+        1,
+        MAX_PAGES + 1,
+    ):
+
+        try:
+
+            response = _get(
+                current_url
+            )
+
+        except Exception as exc:
+
+            print(
+                f"❌ فشل جلب صفحة كووورة: "
+                f"{current_url} -> {exc}"
+            )
+
+            break
+
+        effective_url = (
+            response.url
+            or current_url
+        )
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+
+        page_candidates = []
+
+        article_links = 0
+
+        dated_links = 0
+
+        in_window = 0
+
+        for a in soup.find_all(
+            "a",
+            href=True,
+        ):
+
+            href = _canonical_url(
+                urljoin(
+                    effective_url,
+                    a.get(
+                        "href",
+                        "",
+                    ),
+                )
+            )
+
+            if (
+                href in seen_urls
+                or not _is_article_url(
+                    href
+                )
+            ):
+                continue
+
+            title = _extract_title(
+                a
+            )
+
+            if (
+                not title
+                or len(title) < 8
+            ):
+                continue
+
+            article_links += 1
+
+            published = _find_card_date(
+                a
+            )
+
+            # Fallback to article itself.
+            if not published:
+
+                published = _article_date(
+                    href
+                )
+
+            if not published:
+
+                print(
+                    f"⚠️ تعذر استخراج تاريخ: "
+                    f"{href}"
+                )
+
+                continue
+
+            dated_links += 1
+
+            seen_urls.add(
+                href
+            )
+
+            page_candidates.append(
+                (
+                    published,
+                    title,
+                    href,
+                )
+            )
+
+            # --------------------------------------------------
+            # The timestamp is already in SOURCE_TZ.
+            # No UTC conversion is needed here.
+            # --------------------------------------------------
+
+            if (
+                cutoff_source
+                <= published
+                <= cycle_start_source
+                + timedelta(
+                    minutes=15
+                )
+            ):
+
+                in_window += 1
+
+                results.append(
+                    {
+                        "title": title,
+                        "link": href,
+                        "url": href,
+                        "matched_keyword": "",
+                        "published_at": published,
+                    }
+                )
+
+                print(
+                    "✅ خبر ضمن النافذة: "
+                    f"{published.isoformat()} | "
+                    f"{title[:100]} | "
+                    f"{href}"
+                )
+
+        print(
+            f"📄 صفحة {page_number}: "
+            f"article_links={article_links} "
+            f"dated_links={dated_links} "
+            f"in_window={in_window}"
+        )
+
+        # -----------------------------------------------------
+        # If this page has timestamps and its newest article
+        # is already older than the six-hour cutoff, older
+        # pages cannot contain newer news.
+        # -----------------------------------------------------
+
+        if page_candidates:
+
+            newest = max(
+                item[0]
+                for item in page_candidates
+            )
+
+            oldest = min(
+                item[0]
+                for item in page_candidates
+            )
+
+            print(
+                f"🕐 نطاق الصفحة: "
+                f"{oldest.isoformat()} -> "
+                f"{newest.isoformat()}"
+            )
+
+            if newest < cutoff_source:
+
+                print(
+                    "🛑 أحدث خبر في الصفحة "
+                    "أقدم من نافذة الست ساعات."
+                )
+
+                break
+
+        next_page = _find_next_page(
+            soup,
+            effective_url,
+        )
+
+        if not next_page:
+
+            print(
+                "ℹ️ لا توجد صفحة أقدم أخرى."
+            )
+
+            break
+
+        if (
+            next_page in seen_urls
+        ):
+
+            break
+
+        current_url = next_page
+
+    # ---------------------------------------------------------
+    # Remove duplicates.
+    # ---------------------------------------------------------
+
+    unique = {}
+
+    for item in results:
+
+        link = item[
+            "link"
+        ]
+
+        if link not in unique:
+
+            unique[
+                link
+            ] = item
+
+    results = list(
+        unique.values()
     )
 
-    if direct_news:
-        all_news = direct_news
-
-        print(
-            f"✅ تم العثور على {len(direct_news)} "
-            "خبرًا من كووورة مباشرة ضمن النافذة الزمنية."
-        )
-
-    else:
-        print(
-            "⚠️ لم يتم الحصول على أخبار مباشرة "
-            "ضمن النافذة الزمنية من كووورة."
-        )
-
-        print(
-            "🔄 الانتقال إلى Google News "
-            "كخطة احتياطية..."
-        )
-
-        all_news = _fetch_google_news_fallback(
-            cycle_start,
-            max_age,
-        )
-
-    all_news = [
-        news
-        for news in all_news
-        if _is_recent(
-            news.get("published_dt"),
-            cycle_start,
-            max_age,
-        )
-    ]
-
-    all_news.sort(
-        key=lambda x: x["published_dt"],
+    results.sort(
+        key=lambda item: item[
+            "published_at"
+        ],
         reverse=True,
     )
 
-    for news in all_news:
-        news.pop(
-            "published_dt",
-            None,
-        )
+    print(
+        f"📰 إجمالي أخبار كووورة "
+        f"داخل آخر {LOOKBACK_HOURS} ساعات: "
+        f"{len(results)}"
+    )
 
-    return all_news
+    return results
