@@ -1,12 +1,10 @@
 """
 article_extractor.py
 =====================
-يحل رابط Google News إلى الرابط الأصلي، يتحقق أنه ليس ضمن النطاقات الممنوعة،
+يستقبل رابط مقال من كووورة مباشرة، يتحقق أنه ليس ضمن النطاقات الممنوعة،
 ثم يستخرج من نفس الصفحة: نص المقال الكامل والصورة البارزة.
 """
 
-import re
-import base64
 import json
 import requests
 from bs4 import BeautifulSoup
@@ -34,53 +32,6 @@ def is_blocked_domain(url: str) -> bool:
         return any(netloc == blocked or netloc.endswith("." + blocked) for blocked in BLOCKED_DOMAINS)
     except Exception:
         return False
-
-
-def resolve_google_news_url(gnews_url: str, timeout: int = 10) -> str:
-    try:
-        match = re.search(r"/articles/([^?]+)", gnews_url)
-        if match:
-            encoded = match.group(1)
-            padded = encoded + "=" * (-len(encoded) % 4)
-            decoded = base64.urlsafe_b64decode(padded)
-            url_match = re.search(rb"https?://[^\x00-\x1f\"']+", decoded)
-            if url_match:
-                candidate = url_match.group(0).decode("utf-8", errors="ignore")
-                if "google.com" not in candidate:
-                    return candidate
-    except Exception:
-        pass
-
-    try:
-        resp = requests.get(gnews_url, headers=HEADERS, timeout=timeout, allow_redirects=True)
-        final_url = resp.url
-        if "news.google.com" not in final_url:
-            return final_url
-        soup = BeautifulSoup(resp.text, "lxml")
-        meta_refresh = soup.find("meta", attrs={"http-equiv": re.compile("refresh", re.I)})
-        if meta_refresh and meta_refresh.get("content"):
-            m = re.search(r"url=(\S+)", meta_refresh["content"], re.I)
-            if m:
-                return m.group(1).strip("'\"")
-        c_wiz = soup.find("c-wiz")
-        if c_wiz:
-            article = c_wiz.find("a")
-            if article and article.get("href"):
-                return article["href"]
-    except Exception:
-        pass
-
-    try:
-        from googlenewsdecoder import new_decoderv1
-        result = new_decoderv1(gnews_url)
-        if result.get("status") and result.get("decoded_url"):
-            return result["decoded_url"]
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    return gnews_url
 
 
 def _extract_image_from_soup(soup: BeautifulSoup, base_url: str) -> str | None:
@@ -160,19 +111,17 @@ def _extract_text_from_soup(soup: BeautifulSoup) -> str:
     return full_text.strip()
 
 
-def extract_article(gnews_link: str, timeout: int = 12) -> dict:
-    real_url = resolve_google_news_url(gnews_link, timeout=timeout)
-
-    if is_blocked_domain(real_url):
-        print(f"🚫 مصدر ممنوع — تم تجاوز الخبر بدون جلب محتواه: {real_url}")
-        return {"resolved_url": real_url, "text": "", "image_url": None, "success": False, "blocked": True}
+def extract_article(article_link: str, timeout: int = 12) -> dict:
+    if is_blocked_domain(article_link):
+        print(f"🚫 مصدر ممنوع — تم تجاوز الخبر بدون جلب محتواه: {article_link}")
+        return {"resolved_url": article_link, "text": "", "image_url": None, "success": False, "blocked": True}
 
     try:
-        resp = requests.get(real_url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        resp = requests.get(article_link, headers=HEADERS, timeout=timeout, allow_redirects=True)
         resp.raise_for_status()
     except Exception as e:
-        print(f"⚠️ تعذر الوصول للرابط الأصلي: {real_url} — {e}")
-        return {"resolved_url": real_url, "text": "", "image_url": None, "success": False, "blocked": False}
+        print(f"⚠️ تعذر الوصول للرابط: {article_link} — {e}")
+        return {"resolved_url": article_link, "text": "", "image_url": None, "success": False, "blocked": False}
 
     if is_blocked_domain(resp.url):
         print(f"🚫 مصدر ممنوع (بعد إعادة توجيه) — تم تجاوز الخبر: {resp.url}")
@@ -185,13 +134,13 @@ def extract_article(gnews_link: str, timeout: int = 12) -> dict:
     text = _extract_text_from_soup(soup)
 
     if not image_url:
-        print(f"⚠️ تنبيه: لم يتم العثور على صورة للخبر: {real_url}")
+        print(f"⚠️ تنبيه: لم يتم العثور على صورة للخبر: {article_link}")
 
     # خفض الحد الأدنى لطول النص المقبول إلى 40 حرفاً لمنع التجاوز غير الضروري
     has_sufficient_text = bool(text and len(text) >= 40)
 
     if not has_sufficient_text:
-        print(f"⚠️ تنبيه: نص المقال قصير جدًا أو فارغ: {real_url}")
+        print(f"⚠️ تنبيه: نص المقال قصير جدًا أو فارغ: {article_link}")
 
     return {
         "resolved_url": base_url,
