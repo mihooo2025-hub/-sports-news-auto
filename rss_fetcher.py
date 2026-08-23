@@ -145,6 +145,30 @@ def _fetch_url(
         return response.read()
 
 
+NON_ARTICLE_SEGMENTS = {
+    "live",
+    "videos",
+    "video",
+    "photos",
+    "photo",
+    "gallery",
+    "tags",
+    "tag",
+    "category",
+    "categories",
+    "teams",
+    "team",
+    "players",
+    "player",
+    "standings",
+    "fixtures",
+    "results",
+    "live-scores",
+    "livescore",
+    "livescores",
+}
+
+
 def _article_url(url: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url)
@@ -165,9 +189,7 @@ def _article_url(url: str) -> bool:
         if len(parts) < 2:
             return False
 
-        last = parts[-1]
-
-        # صفحات الأخبار نفسها ليست مقالات.
+        # صفحات الأخبار نفسها (القوائم) ليست مقالات.
         if path in {"/news", "/news/"}:
             return False
 
@@ -177,13 +199,36 @@ def _article_url(url: str) -> bool:
         ):
             return False
 
+        # استبعاد صفحات ليست مقالات إخبارية (فيديو، بث مباشر، تصنيفات...)
+        if any(
+            part.lower() in NON_ARTICLE_SEGMENTS
+            for part in parts
+        ):
+            return False
+
+        last = parts[-1]
+
+        # رابط ينتهي برقم صافٍ، مثل: /news/123456
         if re.fullmatch(
             r"\d+",
             last,
         ):
             return True
 
+        # رابط يبدأ بمعرف من نوع "blt"
         if last.startswith("blt"):
+            return True
+
+        # رابط بصيغة "معرف-عنوان-الخبر" أو "عنوان-الخبر-معرف"
+        # مثل: /news/123456-title-here أو /news/title-here-123456
+        if re.search(r"(?:^|-)\d{4,}(?:-|$)", last):
+            return True
+
+        # رابط بصيغة /news/<رقم>/عنوان-الخبر — المعرف الرقمي في جزء سابق من المسار
+        if any(
+            re.fullmatch(r"\d{4,}", part)
+            for part in parts[:-1]
+        ):
             return True
 
         return False
@@ -688,7 +733,7 @@ def fetch_prioritized_news(
 
     pages = settings.get(
         "kooora_pages",
-        3,
+        6,
     )
 
     print(
