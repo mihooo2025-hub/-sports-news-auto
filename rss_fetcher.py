@@ -24,12 +24,7 @@ import db
 
 
 KOOORA_BASE = "https://www.kooora.com"
-# رابط صفحة الأخبار الصحيح على كووورة (المسار العربي "/أخبار").
-# الرابط القديم "/news" غير صحيح ولا يعيد أي مقالات فعلية،
-# وهو السبب الرئيسي في ضعف عدد الأخبار المجلوبة سابقًا.
-# يجب ترميز الجزء العربي (URL-encode) وإلا يفشل urllib بخطأ
-# "'ascii' codec can't encode characters" عند بناء الطلب.
-KOOORA_NEWS = f"{KOOORA_BASE}/{urllib.parse.quote('أخبار')}"
+KOOORA_NEWS = f"{KOOORA_BASE}/news"
 
 KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
@@ -496,41 +491,6 @@ def _fetch_kooora_direct(
                 raw_data,
                 "Kooora",
             )
-
-            # تسجيل تشخيصي: يوضح هل المشكلة في التحليل
-            # (لا توجد روابط مقالات) أم في نافذة التوقيت
-            # (روابط موجودة لكن قديمة عن النافذة المطلوبة).
-            print(
-                f"🧪 تشخيص صفحة {page}: "
-                f"حجم الاستجابة {len(raw_data)} بايت، "
-                f"عدد المقالات المكتشفة (بغض النظر عن التوقيت): "
-                f"{len(page_news)}"
-            )
-
-            if page_news:
-                dates_found = [
-                    item["published_dt"]
-                    for item in page_news
-                    if item.get("published_dt")
-                ]
-
-                if dates_found:
-                    print(
-                        f"🧪 أحدث تاريخ مكتشف: "
-                        f"{max(dates_found).isoformat()}"
-                    )
-
-                    print(
-                        f"🧪 أقدم تاريخ مكتشف: "
-                        f"{min(dates_found).isoformat()}"
-                    )
-            else:
-                print(
-                    "🧪 لم يتم العثور على أي رابط مقال "
-                    "مطابق للشروط في هذه الصفحة — "
-                    "قد تكون بنية الصفحة تغيّرت أو "
-                    "تحتاج JavaScript rendering."
-                )
 
             for item in page_news:
                 link = item["link"]
