@@ -497,6 +497,41 @@ def _fetch_kooora_direct(
                 "Kooora",
             )
 
+            # تسجيل تشخيصي: يوضح هل المشكلة في التحليل
+            # (لا توجد روابط مقالات) أم في نافذة التوقيت
+            # (روابط موجودة لكن قديمة عن النافذة المطلوبة).
+            print(
+                f"🧪 تشخيص صفحة {page}: "
+                f"حجم الاستجابة {len(raw_data)} بايت، "
+                f"عدد المقالات المكتشفة (بغض النظر عن التوقيت): "
+                f"{len(page_news)}"
+            )
+
+            if page_news:
+                dates_found = [
+                    item["published_dt"]
+                    for item in page_news
+                    if item.get("published_dt")
+                ]
+
+                if dates_found:
+                    print(
+                        f"🧪 أحدث تاريخ مكتشف: "
+                        f"{max(dates_found).isoformat()}"
+                    )
+
+                    print(
+                        f"🧪 أقدم تاريخ مكتشف: "
+                        f"{min(dates_found).isoformat()}"
+                    )
+            else:
+                print(
+                    "🧪 لم يتم العثور على أي رابط مقال "
+                    "مطابق للشروط في هذه الصفحة — "
+                    "قد تكون بنية الصفحة تغيّرت أو "
+                    "تحتاج JavaScript rendering."
+                )
+
             for item in page_news:
                 link = item["link"]
                 title = item["title"]
