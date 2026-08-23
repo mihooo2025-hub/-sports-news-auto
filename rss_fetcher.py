@@ -24,7 +24,10 @@ import db
 
 
 KOOORA_BASE = "https://www.kooora.com"
-KOOORA_NEWS = f"{KOOORA_BASE}/news"
+# رابط صفحة الأخبار الصحيح على كووورة (المسار العربي "/أخبار").
+# الرابط القديم "/news" غير صحيح ولا يعيد أي مقالات فعلية،
+# وهو السبب الرئيسي في ضعف عدد الأخبار المجلوبة سابقًا.
+KOOORA_NEWS = f"{KOOORA_BASE}/أخبار"
 
 KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
