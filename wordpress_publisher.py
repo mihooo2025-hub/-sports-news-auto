@@ -334,7 +334,7 @@ def create_draft_post(
     post_payload = {
         "title": main_title,
         "content": ai_result["rewritten_content"],
-        "status": "draft",
+        "status": "publish",
         "categories": category_ids,
     }
 
@@ -403,7 +403,7 @@ def publish_post(
     post_payload = {
         "title": title,
         "content": content,
-        "status": "draft",
+        "status": "publish",
         "categories": category_ids,
     }
 
