@@ -26,6 +26,11 @@ import db
 KOOORA_BASE = "https://www.kooora.com"
 KOOORA_NEWS = f"{KOOORA_BASE}/news"
 
+# كووورة تستخدم هذا المسار فعليًا للصفحات التالية:
+# https://www.kooora.com/أخبار/2
+# https://www.kooora.com/أخبار/3
+KOOORA_PAGINATION_SEGMENT = "أخبار"
+
 KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
 )
@@ -131,6 +136,8 @@ def _fetch_url(
             "q=0.9,image/avif,image/webp,*/*;q=0.8"
         ),
         "Accept-Language": "ar,en-US;q=0.8,en;q=0.6",
+        "Referer": "https://www.kooora.com/",
+        "Connection": "keep-alive",
     }
 
     request = urllib.request.Request(
@@ -180,6 +187,7 @@ def _article_url(url: str) -> bool:
             return False
 
         path = parsed.path.rstrip("/")
+
         parts = [
             p
             for p in path.split("/")
@@ -189,12 +197,24 @@ def _article_url(url: str) -> bool:
         if len(parts) < 2:
             return False
 
-        # صفحات الأخبار نفسها (القوائم) ليست مقالات.
-        if path in {"/news", "/news/"}:
+        # صفحات القوائم نفسها ليست مقالات.
+        if path in {
+            "/news",
+            "/news/",
+            "/أخبار",
+            "/أخبار/",
+        }:
+            return False
+
+        # صفحات الترقيم ليست مقالات.
+        if re.fullmatch(
+            r"news/\d+",
+            path.lstrip("/"),
+        ):
             return False
 
         if re.fullmatch(
-            r"news/\d+",
+            r"أخبار/\d+",
             path.lstrip("/"),
         ):
             return False
@@ -209,26 +229,29 @@ def _article_url(url: str) -> bool:
 
         last = parts[-1]
 
-        # رابط ينتهي برقم صافٍ، مثل: /news/123456
+        # رابط ينتهي برقم صافٍ، مثل:
+        # /news/123456
         if re.fullmatch(
             r"\d+",
             last,
         ):
             return True
 
-        # رابط يبدأ بمعرف من نوع "blt"
-        if last.startswith("blt"):
+        # رابط يبدأ بمعرف من نوع blt
+        if last.lower().startswith("blt"):
             return True
 
-        # رابط بصيغة "معرف-عنوان-الخبر"
-        # أو "عنوان-الخبر-معرف"
+        # رابط بصيغة:
+        # معرف-عنوان-الخبر
+        # أو عنوان-الخبر-معرف
         if re.search(
             r"(?:^|-)\d{4,}(?:-|$)",
             last,
         ):
             return True
 
-        # رابط بصيغة /news/<رقم>/عنوان-الخبر
+        # رابط بصيغة:
+        # /news/<رقم>/عنوان-الخبر
         if any(
             re.fullmatch(
                 r"\d{4,}",
@@ -248,7 +271,13 @@ def _parse_datetime(value: str):
     if not value:
         return None
 
-    value = value.strip()
+    value = (
+        str(value)
+        .strip()
+    )
+
+    if not value:
+        return None
 
     try:
         value = value.replace(
@@ -277,13 +306,15 @@ def _parse_visible_datetime(text: str):
     """
     استخراج التاريخ والوقت من النص الظاهر في بطاقة الخبر.
 
-    يدعم مثلًا:
+    يدعم:
         09:46 20 أغسطس 2026
         20 أغسطس 2026 09:46
 
-    ويدعم أيضًا الشكل الذي يظهر في كووورة
-    عندما يكون الوقت والتاريخ متلاصقين:
+    ويدعم الشكل الحالي الذي يظهر في كووورة:
         09:4620 أغسطس 2026
+
+    كما يتعامل مع المسافات غير التقليدية
+    وأرقام العربية والفارسية.
     """
 
     if not text:
@@ -292,6 +323,20 @@ def _parse_visible_datetime(text: str):
     text = (
         str(text)
         .translate(ARABIC_DIGITS)
+    )
+
+    # إزالة المسافات غير المرئية أو الخاصة.
+    text = text.replace(
+        "\u200f",
+        " ",
+    )
+    text = text.replace(
+        "\u200e",
+        " ",
+    )
+    text = text.replace(
+        "\u00a0",
+        " ",
     )
 
     text = re.sub(
@@ -307,18 +352,29 @@ def _parse_visible_datetime(text: str):
     )
 
     patterns = [
+        # الشكل الحالي في كووورة:
+        # HH:MMDD MONTH YYYY
+        #
+        # مثال:
+        # 12:3129 أغسطس 2026
+        rf"(\d{{1,2}}):(\d{{2}})\s*"
+        rf"(\d{{1,2}})\s*"
+        rf"{month_pattern}\s*"
+        rf"(\d{{4}})",
+
         # الشكل:
         # HH:MM DD MONTH YYYY
-        #
-        # \s* بدل \s+
-        # حتى يعمل سواء كان هناك فراغ أو لا.
-        rf"(\d{{1,2}}):(\d{{2}})\s*"
-        rf"(\d{{1,2}})\s*{month_pattern}\s*(\d{{4}})",
+        rf"(\d{{1,2}}):(\d{{2}})\s+"
+        rf"(\d{{1,2}})\s+"
+        rf"{month_pattern}\s+"
+        rf"(\d{{4}})",
 
         # الشكل:
         # DD MONTH YYYY HH:MM
-        rf"(\d{{1,2}})\s*{month_pattern}\s*"
-        rf"(\d{{4}})\s*(\d{{1,2}}):(\d{{2}})",
+        rf"(\d{{1,2}})\s*"
+        rf"{month_pattern}\s*"
+        rf"(\d{{4}})\s*"
+        rf"(\d{{1,2}}):(\d{{2}})",
     ]
 
     for pattern in patterns:
@@ -333,35 +389,42 @@ def _parse_visible_datetime(text: str):
         try:
             groups = match.groups()
 
-            # كلا النمطين يحتويان على 5 مجموعات.
-            if len(groups) == 5:
+            if len(groups) != 5:
+                continue
 
-                # الشكل الأول:
-                # HH:MM DD MONTH YYYY
-                if ":" in match.group(0).split()[0]:
-                    hour = int(groups[0])
-                    minute = int(groups[1])
-                    day = int(groups[2])
-                    month_name = groups[3]
-                    year = int(groups[4])
-
-                # الشكل الثاني:
-                # DD MONTH YYYY HH:MM
-                else:
-                    day = int(groups[0])
-                    month_name = groups[1]
-                    year = int(groups[2])
-                    hour = int(groups[3])
-                    minute = int(groups[4])
+            # التمييز بين:
+            #
+            # HH:MM DD MONTH YYYY
+            #
+            # و:
+            #
+            # DD MONTH YYYY HH:MM
+            #
+            if ":" in match.group(0).split()[0]:
+                hour = int(groups[0])
+                minute = int(groups[1])
+                day = int(groups[2])
+                month_name = groups[3]
+                year = int(groups[4])
 
             else:
-                continue
+                day = int(groups[0])
+                month_name = groups[1]
+                year = int(groups[2])
+                hour = int(groups[3])
+                minute = int(groups[4])
 
             month = ARABIC_MONTHS.get(
                 month_name
             )
 
             if not month:
+                continue
+
+            if hour < 0 or hour > 23:
+                continue
+
+            if minute < 0 or minute > 59:
                 continue
 
             naive_dt = datetime(
@@ -372,10 +435,14 @@ def _parse_visible_datetime(text: str):
                 minute,
             )
 
-            return naive_dt.replace(
-                tzinfo=KOOORA_TIMEZONE
-            ).astimezone(
-                timezone.utc
+            return (
+                naive_dt
+                .replace(
+                    tzinfo=KOOORA_TIMEZONE
+                )
+                .astimezone(
+                    timezone.utc
+                )
             )
 
         except Exception:
@@ -384,23 +451,162 @@ def _parse_visible_datetime(text: str):
     return None
 
 
+def _extract_datetime_from_node_attributes(node):
+    """
+    البحث عن التاريخ في خصائص HTML للعقدة نفسها.
+
+    يدعم:
+    - datetime
+    - content
+    - data-datetime
+    - data-time
+    - data-date
+    - title
+    - aria-label
+    """
+
+    if node is None:
+        return None
+
+    attributes = [
+        "datetime",
+        "content",
+        "data-datetime",
+        "data-time",
+        "data-date",
+        "data-published",
+        "data-published-at",
+        "title",
+        "aria-label",
+    ]
+
+    for attribute in attributes:
+        value = node.get(
+            attribute
+        )
+
+        if not value:
+            continue
+
+        parsed = _parse_datetime(
+            value
+        )
+
+        if parsed:
+            return parsed
+
+        parsed = _parse_visible_datetime(
+            value
+        )
+
+        if parsed:
+            return parsed
+
+    return None
+
+
 def _extract_entry_time(anchor):
     """
-    يحاول العثور على وقت نشر الخبر من:
-    1. عناصر <time>.
-    2. النص الظاهر في الرابط.
-    3. النص الظاهر في العناصر الأب القريبة.
+    استخراج وقت نشر الخبر من البطاقة نفسها.
+
+    الأولوية:
+    1. خصائص الرابط نفسه.
+    2. عناصر <time> داخل الرابط.
+    3. النص الظاهر داخل الرابط.
+    4. خصائص العناصر القريبة جدًا.
+    5. النص الظاهر في الأب المباشر فقط.
+
+    لا يتم الصعود لمسافات كبيرة داخل DOM
+    لأن الأب قد يحتوي عدة أخبار مختلفة.
     """
 
-    node = anchor
+    if anchor is None:
+        return None
 
-    for _ in range(7):
-        if node is None:
+    # -------------------------------------------------
+    # 1) خصائص الرابط نفسه.
+    # -------------------------------------------------
+    parsed = _extract_datetime_from_node_attributes(
+        anchor
+    )
+
+    if parsed:
+        return parsed
+
+    # -------------------------------------------------
+    # 2) عناصر <time> داخل الرابط نفسه.
+    # -------------------------------------------------
+    time_tags = anchor.find_all(
+        "time"
+    )
+
+    for time_tag in time_tags:
+        value = (
+            time_tag.get("datetime")
+            or time_tag.get("content")
+            or time_tag.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        parsed = _parse_datetime(
+            value
+        )
+
+        if parsed:
+            return parsed
+
+        parsed = _parse_visible_datetime(
+            value
+        )
+
+        if parsed:
+            return parsed
+
+    # -------------------------------------------------
+    # 3) النص الظاهر داخل الرابط نفسه.
+    #
+    # هذه أهم نقطة مع كووورة الحالية.
+    # -------------------------------------------------
+    anchor_text = anchor.get_text(
+        " ",
+        strip=True,
+    )
+
+    parsed = _parse_visible_datetime(
+        anchor_text
+    )
+
+    if parsed:
+        return parsed
+
+    # -------------------------------------------------
+    # 4) البحث في العناصر الأب القريبة جدًا،
+    # ولكن في خصائصها فقط أولًا.
+    # -------------------------------------------------
+    parent = anchor.parent
+
+    for _ in range(3):
+        if parent is None:
             break
 
-        time_tag = node.find("time")
+        parsed = _extract_datetime_from_node_attributes(
+            parent
+        )
 
-        if time_tag:
+        if parsed:
+            return parsed
+
+        # إذا كان الأب يحتوي على time واحد فقط،
+        # يمكن اعتباره وقت البطاقة.
+        time_tags = parent.find_all(
+            "time"
+        )
+
+        if len(time_tags) == 1:
+            time_tag = time_tags[0]
+
             value = (
                 time_tag.get("datetime")
                 or time_tag.get("content")
@@ -417,39 +623,34 @@ def _extract_entry_time(anchor):
             if parsed:
                 return parsed
 
-        node = node.parent
+            parsed = _parse_visible_datetime(
+                value
+            )
 
-    anchor_text = anchor.get_text(
-        " ",
-        strip=True,
-    )
+            if parsed:
+                return parsed
 
-    parsed = _parse_visible_datetime(
-        anchor_text
-    )
+        parent = parent.parent
 
-    if parsed:
-        return parsed
+    # -------------------------------------------------
+    # 5) محاولة أخيرة في الأب المباشر فقط.
+    #
+    # لا نصعد أكثر حتى لا نأخذ وقت خبر آخر.
+    # -------------------------------------------------
+    direct_parent = anchor.parent
 
-    node = anchor
-
-    for _ in range(5):
-        if node is None:
-            break
-
-        text = node.get_text(
+    if direct_parent is not None:
+        parent_text = direct_parent.get_text(
             " ",
             strip=True,
         )
 
         parsed = _parse_visible_datetime(
-            text
+            parent_text
         )
 
         if parsed:
             return parsed
-
-        node = node.parent
 
     return None
 
@@ -466,10 +667,17 @@ def _parse_kooora_page(
     results = []
     seen = set()
 
+    total_anchors = 0
+    article_candidates = 0
+    parsed_times = 0
+    missing_times = 0
+
     for anchor in soup.find_all(
         "a",
         href=True,
     ):
+        total_anchors += 1
+
         href = anchor.get(
             "href",
             "",
@@ -485,6 +693,8 @@ def _parse_kooora_page(
 
         if not _article_url(link):
             continue
+
+        article_candidates += 1
 
         link = link.split(
             "#",
@@ -514,10 +724,26 @@ def _parse_kooora_page(
             anchor
         )
 
-        # لا نحول الخبر الذي لا نعرف
-        # وقت نشره إلى "الآن".
         if not published_dt:
+            missing_times += 1
+
+            # تشخيص محدود حتى لا يمتلئ GitHub Actions
+            # بآلاف الأسطر.
+            if missing_times <= 10:
+                print(
+                    "⚠️ تم اكتشاف رابط خبر لكن "
+                    "تعذر استخراج وقت النشر:"
+                )
+                print(
+                    f"   🔗 {link}"
+                )
+                print(
+                    f"   📰 {title[:180]}"
+                )
+
             continue
+
+        parsed_times += 1
 
         seen.add(link)
 
@@ -532,7 +758,43 @@ def _parse_kooora_page(
             }
         )
 
+    print(
+        "📊 تحليل صفحة كووورة: "
+        f"anchors={total_anchors}, "
+        f"article_candidates={article_candidates}, "
+        f"parsed_times={parsed_times}, "
+        f"missing_times={missing_times}"
+    )
+
     return results
+
+
+def _kooora_page_url(page: int) -> str:
+    """
+    إنشاء رابط صفحة كووورة الصحيح.
+
+    الصفحة الأولى:
+        /news
+
+    الصفحات التالية في كووورة:
+        /أخبار/2
+        /أخبار/3
+        ...
+    """
+
+    if page <= 1:
+        return KOOORA_NEWS
+
+    encoded_segment = urllib.parse.quote(
+        KOOORA_PAGINATION_SEGMENT,
+        safe="",
+    )
+
+    return (
+        f"{KOOORA_BASE}/"
+        f"{encoded_segment}/"
+        f"{page}"
+    )
 
 
 def _fetch_kooora_direct(
@@ -548,21 +810,33 @@ def _fetch_kooora_direct(
         1,
         pages + 1,
     ):
-        url = (
-            KOOORA_NEWS
-            if page == 1
-            else f"{KOOORA_NEWS}/{page}"
+        url = _kooora_page_url(
+            page
         )
 
         try:
+            print(
+                f"🌐 فحص صفحة كووورة رقم {page}: "
+                f"{url}"
+            )
+
             raw_data = _fetch_url(
                 url
+            )
+
+            print(
+                f"📦 حجم الصفحة المستلمة: "
+                f"{len(raw_data):,} bytes"
             )
 
             page_news = _parse_kooora_page(
                 raw_data,
                 "Kooora",
             )
+
+            page_recent = 0
+            page_old = 0
+            page_processed = 0
 
             for item in page_news:
                 link = item["link"]
@@ -585,12 +859,16 @@ def _fetch_kooora_direct(
                     cycle_start,
                     max_age,
                 ):
+                    page_old += 1
                     continue
+
+                page_recent += 1
 
                 if db.is_processed(
                     link,
                     title,
                 ):
+                    page_processed += 1
                     continue
 
                 seen_links.add(link)
@@ -600,9 +878,18 @@ def _fetch_kooora_direct(
 
                 all_news.append(item)
 
+            print(
+                f"📊 صفحة {page}: "
+                f"articles={len(page_news)}, "
+                f"recent={page_recent}, "
+                f"already_processed={page_processed}, "
+                f"outside_window={page_old}"
+            )
+
         except Exception as e:
             print(
-                f"⚠️ تعذر جلب صفحة كووورة رقم {page}: {e}"
+                f"⚠️ تعذر جلب صفحة كووورة رقم "
+                f"{page}: {e}"
             )
 
     return all_news
@@ -762,6 +1049,17 @@ def fetch_prioritized_news(
     pages = settings.get(
         "kooora_pages",
         6,
+    )
+
+    # ضمان أن عدد الصفحات رقم صحيح وموجب.
+    try:
+        pages = int(pages)
+    except Exception:
+        pages = 6
+
+    pages = max(
+        1,
+        pages,
     )
 
     print(
