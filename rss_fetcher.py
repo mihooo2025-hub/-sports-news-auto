@@ -24,7 +24,13 @@ import db
 
 
 KOOORA_BASE = "https://www.kooora.com"
-KOOORA_NEWS = f"{KOOORA_BASE}/news"
+
+# كووورة تستخدم حاليًا مسار "أخبار" العربي لصفحة الأخبار.
+# نستخدم الترميز URL-encoded لضمان عمل urllib بشكل صحيح.
+KOOORA_NEWS = (
+    f"{KOOORA_BASE}/"
+    "%D8%A3%D8%AE%D8%A8%D8%A7%D8%B1"
+)
 
 KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
@@ -180,6 +186,7 @@ def _article_url(url: str) -> bool:
             return False
 
         path = parsed.path.rstrip("/")
+
         parts = [
             p
             for p in path.split("/")
@@ -190,43 +197,71 @@ def _article_url(url: str) -> bool:
             return False
 
         # صفحات الأخبار نفسها (القوائم) ليست مقالات.
-        if path in {"/news", "/news/"}:
+        normalized_path = urllib.parse.unquote(
+            path
+        )
+
+        if normalized_path in {
+            "/news",
+            "/أخبار",
+        }:
             return False
 
+        # صفحات ترقيم الأخبار مثل:
+        # /أخبار/2
+        # /أخبار/3
+        # ليست مقالات.
         if re.fullmatch(
-            r"news/\d+",
-            path.lstrip("/"),
+            r"(?:news|أخبار)/\d+",
+            normalized_path.lstrip("/"),
         ):
             return False
 
-        # استبعاد صفحات ليست مقالات إخبارية (فيديو، بث مباشر، تصنيفات...)
+        # استبعاد صفحات ليست مقالات إخبارية
+        # مثل الفيديو والبث والتصنيفات وغيرها.
         if any(
-            part.lower() in NON_ARTICLE_SEGMENTS
+            urllib.parse.unquote(part).lower()
+            in NON_ARTICLE_SEGMENTS
             for part in parts
         ):
             return False
 
-        last = parts[-1]
+        last = urllib.parse.unquote(
+            parts[-1]
+        )
 
-        # رابط ينتهي برقم صافٍ، مثل: /news/123456
+        # رابط ينتهي برقم صافٍ، مثل:
+        # /news/123456
         if re.fullmatch(
             r"\d+",
             last,
         ):
             return True
 
-        # رابط يبدأ بمعرف من نوع "blt"
+        # رابط يبدأ بمعرف من نوع blt
         if last.startswith("blt"):
             return True
 
-        # رابط بصيغة "معرف-عنوان-الخبر" أو "عنوان-الخبر-معرف"
-        # مثل: /news/123456-title-here أو /news/title-here-123456
-        if re.search(r"(?:^|-)\d{4,}(?:-|$)", last):
+        # رابط بصيغة:
+        # معرف-عنوان-الخبر
+        # أو:
+        # عنوان-الخبر-معرف
+        if re.search(
+            r"(?:^|-)\d{4,}(?:-|$)",
+            last,
+        ):
             return True
 
-        # رابط بصيغة /news/<رقم>/عنوان-الخبر — المعرف الرقمي في جزء سابق من المسار
+        # رابط بصيغة:
+        # /news/<رقم>/عنوان-الخبر
+        #
+        # أو أي مسار يحتوي على معرف رقمي
+        # قبل الجزء الأخير.
         if any(
-            re.fullmatch(r"\d{4,}", part)
+            re.fullmatch(
+                r"\d{4,}",
+                urllib.parse.unquote(part),
+            )
             for part in parts[:-1]
         ):
             return True
@@ -249,7 +284,9 @@ def _parse_datetime(value: str):
             "+00:00",
         )
 
-        dt = datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(
+            value
+        )
 
         if dt.tzinfo is None:
             dt = dt.replace(
@@ -385,7 +422,9 @@ def _extract_entry_time(anchor):
                 )
             )
 
-            parsed = _parse_datetime(value)
+            parsed = _parse_datetime(
+                value
+            )
 
             if parsed:
                 return parsed
@@ -527,6 +566,10 @@ def _fetch_kooora_direct(
             else f"{KOOORA_NEWS}/{page}"
         )
 
+        print(
+            f"🔎 فحص صفحة كووورة رقم {page}: {url}"
+        )
+
         try:
             raw_data = _fetch_url(
                 url
@@ -536,6 +579,13 @@ def _fetch_kooora_direct(
                 raw_data,
                 "Kooora",
             )
+
+            print(
+                f"   📄 تم اكتشاف {len(page_news)} "
+                f"رابطًا إخباريًا في الصفحة {page}."
+            )
+
+            page_recent_count = 0
 
             for item in page_news:
                 link = item["link"]
@@ -560,6 +610,8 @@ def _fetch_kooora_direct(
                 ):
                     continue
 
+                page_recent_count += 1
+
                 if db.is_processed(
                     link,
                     title,
@@ -572,6 +624,11 @@ def _fetch_kooora_direct(
                 )
 
                 all_news.append(item)
+
+            print(
+                f"   🕐 أخبار ضمن آخر {max_age} ساعات: "
+                f"{page_recent_count}"
+            )
 
         except Exception as e:
             print(
@@ -710,6 +767,7 @@ def fetch_prioritized_news(
         {},
     )
 
+    # الإبقاء على نافذة آخر 3 ساعات كما طلب المستخدم.
     max_age = 3
 
     if cycle_start is None:
