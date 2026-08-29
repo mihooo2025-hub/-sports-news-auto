@@ -24,13 +24,7 @@ import db
 
 
 KOOORA_BASE = "https://www.kooora.com"
-
-# كووورة تستخدم حاليًا مسار "أخبار" العربي لصفحة الأخبار.
-# نستخدم الترميز URL-encoded لضمان عمل urllib بشكل صحيح.
-KOOORA_NEWS = (
-    f"{KOOORA_BASE}/"
-    "%D8%A3%D8%AE%D8%A8%D8%A7%D8%B1"
-)
+KOOORA_NEWS = f"{KOOORA_BASE}/news"
 
 KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
@@ -186,7 +180,6 @@ def _article_url(url: str) -> bool:
             return False
 
         path = parsed.path.rstrip("/")
-
         parts = [
             p
             for p in path.split("/")
@@ -197,70 +190,49 @@ def _article_url(url: str) -> bool:
             return False
 
         # صفحات الأخبار نفسها (القوائم) ليست مقالات.
-        normalized_path = urllib.parse.unquote(
-            path
-        )
-
-        if normalized_path in {
-            "/news",
-            "/أخبار",
-        }:
+        if path in {"/news", "/news/"}:
             return False
 
-        # صفحات ترقيم الأخبار مثل:
-        # /أخبار/2
-        # /أخبار/3
-        # ليست مقالات.
         if re.fullmatch(
-            r"(?:news|أخبار)/\d+",
-            normalized_path.lstrip("/"),
+            r"news/\d+",
+            path.lstrip("/"),
         ):
             return False
 
         # استبعاد صفحات ليست مقالات إخبارية
-        # مثل الفيديو والبث والتصنيفات وغيرها.
+        # (فيديو، بث مباشر، تصنيفات...)
         if any(
-            urllib.parse.unquote(part).lower()
-            in NON_ARTICLE_SEGMENTS
+            part.lower() in NON_ARTICLE_SEGMENTS
             for part in parts
         ):
             return False
 
-        last = urllib.parse.unquote(
-            parts[-1]
-        )
+        last = parts[-1]
 
-        # رابط ينتهي برقم صافٍ، مثل:
-        # /news/123456
+        # رابط ينتهي برقم صافٍ، مثل: /news/123456
         if re.fullmatch(
             r"\d+",
             last,
         ):
             return True
 
-        # رابط يبدأ بمعرف من نوع blt
+        # رابط يبدأ بمعرف من نوع "blt"
         if last.startswith("blt"):
             return True
 
-        # رابط بصيغة:
-        # معرف-عنوان-الخبر
-        # أو:
-        # عنوان-الخبر-معرف
+        # رابط بصيغة "معرف-عنوان-الخبر"
+        # أو "عنوان-الخبر-معرف"
         if re.search(
             r"(?:^|-)\d{4,}(?:-|$)",
             last,
         ):
             return True
 
-        # رابط بصيغة:
-        # /news/<رقم>/عنوان-الخبر
-        #
-        # أو أي مسار يحتوي على معرف رقمي
-        # قبل الجزء الأخير.
+        # رابط بصيغة /news/<رقم>/عنوان-الخبر
         if any(
             re.fullmatch(
                 r"\d{4,}",
-                urllib.parse.unquote(part),
+                part,
             )
             for part in parts[:-1]
         ):
@@ -308,6 +280,10 @@ def _parse_visible_datetime(text: str):
     يدعم مثلًا:
         09:46 20 أغسطس 2026
         20 أغسطس 2026 09:46
+
+    ويدعم أيضًا الشكل الذي يظهر في كووورة
+    عندما يكون الوقت والتاريخ متلاصقين:
+        09:4620 أغسطس 2026
     """
 
     if not text:
@@ -331,11 +307,18 @@ def _parse_visible_datetime(text: str):
     )
 
     patterns = [
-        rf"(\d{{1,2}}):(\d{{2}})\s+"
-        rf"(\d{{1,2}})\s+{month_pattern}\s+(\d{{4}})",
+        # الشكل:
+        # HH:MM DD MONTH YYYY
+        #
+        # \s* بدل \s+
+        # حتى يعمل سواء كان هناك فراغ أو لا.
+        rf"(\d{{1,2}}):(\d{{2}})\s*"
+        rf"(\d{{1,2}})\s*{month_pattern}\s*(\d{{4}})",
 
-        rf"(\d{{1,2}})\s+{month_pattern}\s+"
-        rf"(\d{{4}})\s+(\d{{1,2}}):(\d{{2}})",
+        # الشكل:
+        # DD MONTH YYYY HH:MM
+        rf"(\d{{1,2}})\s*{month_pattern}\s*"
+        rf"(\d{{4}})\s*(\d{{1,2}}):(\d{{2}})",
     ]
 
     for pattern in patterns:
@@ -350,15 +333,20 @@ def _parse_visible_datetime(text: str):
         try:
             groups = match.groups()
 
-            # الشكل الأول:
-            # HH:MM DD MONTH YYYY
+            # كلا النمطين يحتويان على 5 مجموعات.
             if len(groups) == 5:
+
+                # الشكل الأول:
+                # HH:MM DD MONTH YYYY
                 if ":" in match.group(0).split()[0]:
                     hour = int(groups[0])
                     minute = int(groups[1])
                     day = int(groups[2])
                     month_name = groups[3]
                     year = int(groups[4])
+
+                # الشكل الثاني:
+                # DD MONTH YYYY HH:MM
                 else:
                     day = int(groups[0])
                     month_name = groups[1]
@@ -566,10 +554,6 @@ def _fetch_kooora_direct(
             else f"{KOOORA_NEWS}/{page}"
         )
 
-        print(
-            f"🔎 فحص صفحة كووورة رقم {page}: {url}"
-        )
-
         try:
             raw_data = _fetch_url(
                 url
@@ -579,13 +563,6 @@ def _fetch_kooora_direct(
                 raw_data,
                 "Kooora",
             )
-
-            print(
-                f"   📄 تم اكتشاف {len(page_news)} "
-                f"رابطًا إخباريًا في الصفحة {page}."
-            )
-
-            page_recent_count = 0
 
             for item in page_news:
                 link = item["link"]
@@ -610,8 +587,6 @@ def _fetch_kooora_direct(
                 ):
                     continue
 
-                page_recent_count += 1
-
                 if db.is_processed(
                     link,
                     title,
@@ -624,11 +599,6 @@ def _fetch_kooora_direct(
                 )
 
                 all_news.append(item)
-
-            print(
-                f"   🕐 أخبار ضمن آخر {max_age} ساعات: "
-                f"{page_recent_count}"
-            )
 
         except Exception as e:
             print(
@@ -767,7 +737,7 @@ def fetch_prioritized_news(
         {},
     )
 
-    # الإبقاء على نافذة آخر 3 ساعات كما طلب المستخدم.
+    # الإبقاء على نافذة آخر 3 ساعات.
     max_age = 3
 
     if cycle_start is None:
