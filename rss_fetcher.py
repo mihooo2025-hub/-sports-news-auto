@@ -3,14 +3,20 @@ rss_fetcher.py
 ==============
 يجلب أخبار كووورة مباشرة، مع Google News RSS كخطة احتياطية.
 
-- المصدر الأساسي: صفحات أخبار كووورة.
-- يفحص عدة صفحات من الأحدث إلى الأقدم.
-- يلتزم بآخر 3 ساعات محسوبة من وقت بداية دورة التشغيل.
-- يمنع الأخبار التي لا يمكن تحديد وقت نشرها بدقة من الدخول إلى المعالجة.
-- يمنع التكرار عبر الرابط والعنوان في قاعدة البيانات.
+آلية التحقق:
+1. اكتشاف روابط المقالات من صفحات كووورة.
+2. استبعاد صفحات المباريات والفرق واللاعبين والفيديو والبث وغيرها.
+3. استخدام وقت القائمة كفلتر أولي واسع فقط.
+4. فتح صفحة الخبر نفسها للمرشحين.
+5. استخراج وقت النشر الحقيقي من صفحة المقال.
+6. اعتماد نافذة آخر 3 ساعات بناءً على وقت النشر الحقيقي.
+7. رفض أي صفحة لا يمكن التأكد أنها مقال إخباري أو لا يمكن تحديد
+   وقت نشرها الحقيقي.
+8. منع التكرار عبر الرابط والعنوان في قاعدة البيانات.
 """
 
 import html
+import json
 import re
 import urllib.parse
 import urllib.request
@@ -23,17 +29,30 @@ from config import CONFIG
 import db
 
 
+# ============================================================
+# إعدادات كووورة
+# ============================================================
+
 KOOORA_BASE = "https://www.kooora.com"
 KOOORA_NEWS = f"{KOOORA_BASE}/news"
 
-# كووورة تستخدم هذا المسار فعليًا للصفحات التالية:
-# https://www.kooora.com/أخبار/2
-# https://www.kooora.com/أخبار/3
 KOOORA_PAGINATION_SEGMENT = "أخبار"
 
 KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
 )
+
+# نافذة النشر النهائية المطلوبة.
+FINAL_MAX_AGE_HOURS = 3
+
+# نستخدم نافذة أوسع فقط لاختيار المرشحين من صفحة القائمة.
+# لا تعني أن الخبر مقبول ضمن آخر 9 ساعات.
+PRECHECK_MAX_AGE_HOURS = 9
+
+
+# ============================================================
+# الأشهر والأرقام العربية
+# ============================================================
 
 ARABIC_MONTHS = {
     "يناير": 1,
@@ -59,72 +78,93 @@ ARABIC_DIGITS = str.maketrans(
 )
 
 
-def _is_recent(
-    published_dt,
-    cycle_start: datetime,
-    max_age_hours: int,
-) -> bool:
-    """
-    التأكد من أن الخبر نُشر ضمن النافذة الزمنية المطلوبة.
+# ============================================================
+# نطاقات ليست مقالات
+# ============================================================
 
-    الحد الأعلى:
-        وقت بداية الدورة.
+NON_ARTICLE_SEGMENTS = {
+    # مباريات
+    "match",
+    "matches",
+    "game",
+    "games",
+    "مباراة",
+    "مباريات",
 
-    الحد الأدنى:
-        وقت بداية الدورة ناقص 3 ساعات.
+    # بث مباشر
+    "live",
+    "livescore",
+    "livescores",
+    "live-scores",
+    "بث",
+    "مباشر",
 
-    الأخبار التي لا تملك وقت نشر معروفًا لا تمر.
-    """
+    # فيديو
+    "video",
+    "videos",
+    "فيديو",
+    "فيديوهات",
 
-    if not published_dt:
-        return False
+    # صور
+    "photo",
+    "photos",
+    "gallery",
+    "صور",
+    "معرض",
 
-    try:
-        if published_dt.tzinfo is None:
-            published_dt = published_dt.replace(
-                tzinfo=timezone.utc
-            )
+    # فرق
+    "team",
+    "teams",
+    "فريق",
+    "فرق",
 
-        published_dt = published_dt.astimezone(
-            timezone.utc
-        )
+    # لاعبون
+    "player",
+    "players",
+    "لاعب",
+    "لاعبين",
 
-        cutoff = (
-            cycle_start
-            - timedelta(hours=max_age_hours)
-        )
+    # بطولات
+    "competition",
+    "competitions",
+    "tournament",
+    "tournaments",
+    "league",
+    "leagues",
+    "بطولة",
+    "بطولات",
+    "دوري",
 
-        return (
-            cutoff
-            <= published_dt
-            <= cycle_start
-        )
+    # تصنيفات ونتائج
+    "category",
+    "categories",
+    "tag",
+    "tags",
+    "standings",
+    "fixtures",
+    "results",
+    "ترتيب",
+    "نتائج",
+    "مواعيد",
 
-    except Exception:
-        return False
+    # صفحات عامة
+    "search",
+    "author",
+    "authors",
+    "بحث",
+    "كاتب",
+    "كتاب",
+}
 
 
-def _clean_title(title: str) -> str:
-    for tag in [
-        " - كووورة",
-        " - كوووره",
-        " - Kooora",
-        " - kooora",
-    ]:
-        if title.endswith(tag):
-            title = title[:-len(tag)].strip()
-
-    return re.sub(
-        r"\s+",
-        " ",
-        title,
-    ).strip()
-
+# ============================================================
+# أدوات عامة
+# ============================================================
 
 def _fetch_url(
     url: str,
     timeout: int = 20,
-) -> bytes:
+):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -149,132 +189,43 @@ def _fetch_url(
         request,
         timeout=timeout,
     ) as response:
-        return response.read()
+        return response.read(), response.geturl()
 
 
-NON_ARTICLE_SEGMENTS = {
-    "live",
-    "videos",
-    "video",
-    "photos",
-    "photo",
-    "gallery",
-    "tags",
-    "tag",
-    "category",
-    "categories",
-    "teams",
-    "team",
-    "players",
-    "player",
-    "standings",
-    "fixtures",
-    "results",
-    "live-scores",
-    "livescore",
-    "livescores",
-}
+def _clean_title(title: str) -> str:
+    for tag in [
+        " - كووورة",
+        " - كوووره",
+        " - Kooora",
+        " - kooora",
+    ]:
+        if title.endswith(tag):
+            title = title[:-len(tag)].strip()
+
+    return re.sub(
+        r"\s+",
+        " ",
+        title,
+    ).strip()
 
 
-def _article_url(url: str) -> bool:
-    try:
-        parsed = urllib.parse.urlparse(url)
+def _normalize_title(title: str) -> str:
+    return re.sub(
+        r"\s+",
+        " ",
+        title.strip(),
+    ).lower()
 
-        if parsed.netloc.lower() not in {
-            "kooora.com",
-            "www.kooora.com",
-        }:
-            return False
 
-        path = parsed.path.rstrip("/")
-
-        parts = [
-            p
-            for p in path.split("/")
-            if p
-        ]
-
-        if len(parts) < 2:
-            return False
-
-        # صفحات القوائم نفسها ليست مقالات.
-        if path in {
-            "/news",
-            "/news/",
-            "/أخبار",
-            "/أخبار/",
-        }:
-            return False
-
-        # صفحات الترقيم ليست مقالات.
-        if re.fullmatch(
-            r"news/\d+",
-            path.lstrip("/"),
-        ):
-            return False
-
-        if re.fullmatch(
-            r"أخبار/\d+",
-            path.lstrip("/"),
-        ):
-            return False
-
-        # استبعاد صفحات ليست مقالات إخبارية
-        # (فيديو، بث مباشر، تصنيفات...)
-        if any(
-            part.lower() in NON_ARTICLE_SEGMENTS
-            for part in parts
-        ):
-            return False
-
-        last = parts[-1]
-
-        # رابط ينتهي برقم صافٍ، مثل:
-        # /news/123456
-        if re.fullmatch(
-            r"\d+",
-            last,
-        ):
-            return True
-
-        # رابط يبدأ بمعرف من نوع blt
-        if last.lower().startswith("blt"):
-            return True
-
-        # رابط بصيغة:
-        # معرف-عنوان-الخبر
-        # أو عنوان-الخبر-معرف
-        if re.search(
-            r"(?:^|-)\d{4,}(?:-|$)",
-            last,
-        ):
-            return True
-
-        # رابط بصيغة:
-        # /news/<رقم>/عنوان-الخبر
-        if any(
-            re.fullmatch(
-                r"\d{4,}",
-                part,
-            )
-            for part in parts[:-1]
-        ):
-            return True
-
-        return False
-
-    except Exception:
-        return False
-
+# ============================================================
+# التواريخ
+# ============================================================
 
 def _parse_datetime(value: str):
     if not value:
         return None
 
-    value = (
-        str(value)
-        .strip()
-    )
+    value = str(value).strip()
 
     if not value:
         return None
@@ -285,9 +236,7 @@ def _parse_datetime(value: str):
             "+00:00",
         )
 
-        dt = datetime.fromisoformat(
-            value
-        )
+        dt = datetime.fromisoformat(value)
 
         if dt.tzinfo is None:
             dt = dt.replace(
@@ -304,40 +253,30 @@ def _parse_datetime(value: str):
 
 def _parse_visible_datetime(text: str):
     """
-    استخراج التاريخ والوقت من النص الظاهر في بطاقة الخبر.
+    استخراج التاريخ والوقت من النص العربي.
 
-    يدعم:
+    أمثلة:
         09:46 20 أغسطس 2026
         20 أغسطس 2026 09:46
-
-    ويدعم الشكل الحالي الذي يظهر في كووورة:
         09:4620 أغسطس 2026
-
-    كما يتعامل مع المسافات غير التقليدية
-    وأرقام العربية والفارسية.
     """
 
     if not text:
         return None
 
-    text = (
-        str(text)
-        .translate(ARABIC_DIGITS)
+    text = str(text).translate(
+        ARABIC_DIGITS
     )
 
-    # إزالة المسافات غير المرئية أو الخاصة.
-    text = text.replace(
-        "\u200f",
-        " ",
-    )
-    text = text.replace(
-        "\u200e",
-        " ",
-    )
-    text = text.replace(
-        "\u00a0",
-        " ",
-    )
+    for old, new in [
+        ("\u200f", " "),
+        ("\u200e", " "),
+        ("\u00a0", " "),
+    ]:
+        text = text.replace(
+            old,
+            new,
+        )
 
     text = re.sub(
         r"\s+",
@@ -352,24 +291,12 @@ def _parse_visible_datetime(text: str):
     )
 
     patterns = [
-        # الشكل الحالي في كووورة:
-        # HH:MMDD MONTH YYYY
-        #
-        # مثال:
-        # 12:3129 أغسطس 2026
+        # HH:MM DD MONTH YYYY
         rf"(\d{{1,2}}):(\d{{2}})\s*"
         rf"(\d{{1,2}})\s*"
         rf"{month_pattern}\s*"
         rf"(\d{{4}})",
 
-        # الشكل:
-        # HH:MM DD MONTH YYYY
-        rf"(\d{{1,2}}):(\d{{2}})\s+"
-        rf"(\d{{1,2}})\s+"
-        rf"{month_pattern}\s+"
-        rf"(\d{{4}})",
-
-        # الشكل:
         # DD MONTH YYYY HH:MM
         rf"(\d{{1,2}})\s*"
         rf"{month_pattern}\s*"
@@ -392,21 +319,14 @@ def _parse_visible_datetime(text: str):
             if len(groups) != 5:
                 continue
 
-            # التمييز بين:
-            #
-            # HH:MM DD MONTH YYYY
-            #
-            # و:
-            #
-            # DD MONTH YYYY HH:MM
-            #
-            if ":" in match.group(0).split()[0]:
+            first = match.group(0)
+
+            if ":" in first.split()[0]:
                 hour = int(groups[0])
                 minute = int(groups[1])
                 day = int(groups[2])
                 month_name = groups[3]
                 year = int(groups[4])
-
             else:
                 day = int(groups[0])
                 month_name = groups[1]
@@ -421,10 +341,10 @@ def _parse_visible_datetime(text: str):
             if not month:
                 continue
 
-            if hour < 0 or hour > 23:
+            if not 0 <= hour <= 23:
                 continue
 
-            if minute < 0 or minute > 59:
+            if not 0 <= minute <= 59:
                 continue
 
             naive_dt = datetime(
@@ -451,20 +371,46 @@ def _parse_visible_datetime(text: str):
     return None
 
 
+def _is_recent(
+    published_dt,
+    cycle_start: datetime,
+    max_age_hours: int,
+) -> bool:
+    if not published_dt:
+        return False
+
+    try:
+        if published_dt.tzinfo is None:
+            published_dt = published_dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        published_dt = published_dt.astimezone(
+            timezone.utc
+        )
+
+        cutoff = (
+            cycle_start
+            - timedelta(
+                hours=max_age_hours
+            )
+        )
+
+        return (
+            cutoff
+            <= published_dt
+            <= cycle_start
+        )
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# استخراج التاريخ من خصائص HTML
+# ============================================================
+
 def _extract_datetime_from_node_attributes(node):
-    """
-    البحث عن التاريخ في خصائص HTML للعقدة نفسها.
-
-    يدعم:
-    - datetime
-    - content
-    - data-datetime
-    - data-time
-    - data-date
-    - title
-    - aria-label
-    """
-
     if node is None:
         return None
 
@@ -481,23 +427,17 @@ def _extract_datetime_from_node_attributes(node):
     ]
 
     for attribute in attributes:
-        value = node.get(
-            attribute
-        )
+        value = node.get(attribute)
 
         if not value:
             continue
 
-        parsed = _parse_datetime(
-            value
-        )
+        parsed = _parse_datetime(value)
 
         if parsed:
             return parsed
 
-        parsed = _parse_visible_datetime(
-            value
-        )
+        parsed = _parse_visible_datetime(value)
 
         if parsed:
             return parsed
@@ -505,27 +445,15 @@ def _extract_datetime_from_node_attributes(node):
     return None
 
 
+# ============================================================
+# وقت القائمة - يستخدم للفلترة الأولية فقط
+# ============================================================
+
 def _extract_entry_time(anchor):
-    """
-    استخراج وقت نشر الخبر من البطاقة نفسها.
-
-    الأولوية:
-    1. خصائص الرابط نفسه.
-    2. عناصر <time> داخل الرابط.
-    3. النص الظاهر داخل الرابط.
-    4. خصائص العناصر القريبة جدًا.
-    5. النص الظاهر في الأب المباشر فقط.
-
-    لا يتم الصعود لمسافات كبيرة داخل DOM
-    لأن الأب قد يحتوي عدة أخبار مختلفة.
-    """
-
     if anchor is None:
         return None
 
-    # -------------------------------------------------
-    # 1) خصائص الرابط نفسه.
-    # -------------------------------------------------
+    # خصائص الرابط نفسه
     parsed = _extract_datetime_from_node_attributes(
         anchor
     )
@@ -533,14 +461,8 @@ def _extract_entry_time(anchor):
     if parsed:
         return parsed
 
-    # -------------------------------------------------
-    # 2) عناصر <time> داخل الرابط نفسه.
-    # -------------------------------------------------
-    time_tags = anchor.find_all(
-        "time"
-    )
-
-    for time_tag in time_tags:
+    # عناصر time داخل الرابط
+    for time_tag in anchor.find_all("time"):
         value = (
             time_tag.get("datetime")
             or time_tag.get("content")
@@ -550,25 +472,17 @@ def _extract_entry_time(anchor):
             )
         )
 
-        parsed = _parse_datetime(
-            value
-        )
+        parsed = _parse_datetime(value)
 
         if parsed:
             return parsed
 
-        parsed = _parse_visible_datetime(
-            value
-        )
+        parsed = _parse_visible_datetime(value)
 
         if parsed:
             return parsed
 
-    # -------------------------------------------------
-    # 3) النص الظاهر داخل الرابط نفسه.
-    #
-    # هذه أهم نقطة مع كووورة الحالية.
-    # -------------------------------------------------
+    # النص داخل الرابط
     anchor_text = anchor.get_text(
         " ",
         strip=True,
@@ -581,10 +495,7 @@ def _extract_entry_time(anchor):
     if parsed:
         return parsed
 
-    # -------------------------------------------------
-    # 4) البحث في العناصر الأب القريبة جدًا،
-    # ولكن في خصائصها فقط أولًا.
-    # -------------------------------------------------
+    # العناصر القريبة
     parent = anchor.parent
 
     for _ in range(3):
@@ -598,8 +509,6 @@ def _extract_entry_time(anchor):
         if parsed:
             return parsed
 
-        # إذا كان الأب يحتوي على time واحد فقط،
-        # يمكن اعتباره وقت البطاقة.
         time_tags = parent.find_all(
             "time"
         )
@@ -616,27 +525,19 @@ def _extract_entry_time(anchor):
                 )
             )
 
-            parsed = _parse_datetime(
-                value
-            )
+            parsed = _parse_datetime(value)
 
             if parsed:
                 return parsed
 
-            parsed = _parse_visible_datetime(
-                value
-            )
+            parsed = _parse_visible_datetime(value)
 
             if parsed:
                 return parsed
 
         parent = parent.parent
 
-    # -------------------------------------------------
-    # 5) محاولة أخيرة في الأب المباشر فقط.
-    #
-    # لا نصعد أكثر حتى لا نأخذ وقت خبر آخر.
-    # -------------------------------------------------
+    # الأب المباشر فقط
     direct_parent = anchor.parent
 
     if direct_parent is not None:
@@ -655,10 +556,616 @@ def _extract_entry_time(anchor):
     return None
 
 
+# ============================================================
+# التحقق من نوع الرابط
+# ============================================================
+
+def _article_url(url: str) -> bool:
+    """
+    تحديد ما إذا كان الرابط يمكن أن يكون مقالًا.
+
+    هذه الدالة لا تعتبر الرابط مقالًا بشكل نهائي.
+    التحقق النهائي يتم بعد فتح الصفحة نفسها.
+    """
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+
+        if parsed.netloc.lower() not in {
+            "kooora.com",
+            "www.kooora.com",
+        }:
+            return False
+
+        path = urllib.parse.unquote(
+            parsed.path
+        ).rstrip("/")
+
+        parts = [
+            p
+            for p in path.split("/")
+            if p
+        ]
+
+        if len(parts) < 2:
+            return False
+
+        lower_parts = {
+            part.lower()
+            for part in parts
+        }
+
+        # -------------------------------------------------
+        # صفحات القائمة
+        # -------------------------------------------------
+
+        if path.lower() in {
+            "/news",
+            "/أخبار",
+        }:
+            return False
+
+        # /news/2
+        if re.fullmatch(
+            r"news/\d+",
+            path.lstrip("/"),
+            flags=re.IGNORECASE,
+        ):
+            return False
+
+        # /أخبار/2
+        if re.fullmatch(
+            r"أخبار/\d+",
+            path.lstrip("/"),
+        ):
+            return False
+
+        # -------------------------------------------------
+        # استبعاد صريح للمباراة
+        # -------------------------------------------------
+
+        if any(
+            part.lower()
+            in NON_ARTICLE_SEGMENTS
+            for part in parts
+        ):
+            return False
+
+        # -------------------------------------------------
+        # حماية إضافية للمسارات العربية
+        # -------------------------------------------------
+
+        blocked_exact_segments = {
+            "كرة القدم/مباراة",
+            "كرة القدم/مباريات",
+            "كرة القدم/فيديو",
+            "كرة القدم/فيديوهات",
+            "كرة القدم/بث",
+            "كرة القدم/مباشر",
+            "كرة القدم/نتائج",
+            "كرة القدم/ترتيب",
+            "كرة القدم/مواعيد",
+        }
+
+        normalized_path = "/".join(
+            parts[:2]
+        ).lower()
+
+        if normalized_path in {
+            value.lower()
+            for value in blocked_exact_segments
+        }:
+            return False
+
+        # -------------------------------------------------
+        # صفحات تحتوي معرفًا رقميًا في آخر الرابط
+        # -------------------------------------------------
+
+        last = parts[-1]
+
+        if re.fullmatch(
+            r"\d+",
+            last,
+        ):
+            return True
+
+        if last.lower().startswith("blt"):
+            return True
+
+        if re.search(
+            r"(?:^|-)\d{4,}(?:-|$)",
+            last,
+        ):
+            return True
+
+        if any(
+            re.fullmatch(
+                r"\d{4,}",
+                part,
+            )
+            for part in parts[:-1]
+        ):
+            return True
+
+        # بعض روابط كووورة الحديثة لا تحتوي معرفًا رقميًا.
+        # لذلك لا نرفضها هنا نهائيًا، لكن يجب أن تجتاز
+        # التحقق الحقيقي للصفحة لاحقًا.
+        return True
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# استخراج وقت النشر الحقيقي من صفحة الخبر
+# ============================================================
+
+def _parse_jsonld_datetime(
+    soup: BeautifulSoup,
+):
+    """
+    البحث عن datePublished داخل JSON-LD.
+    """
+
+    for script in soup.find_all(
+        "script",
+        type="application/ld+json",
+    ):
+        raw = script.string or script.get_text(
+            strip=True
+        )
+
+        if not raw:
+            continue
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        objects = []
+
+        if isinstance(data, dict):
+            objects.append(data)
+
+            graph = data.get("@graph")
+
+            if isinstance(graph, list):
+                objects.extend(graph)
+
+        elif isinstance(data, list):
+            objects.extend(data)
+
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+
+            obj_type = obj.get("@type", "")
+
+            if isinstance(
+                obj_type,
+                list,
+            ):
+                obj_type = " ".join(
+                    str(x)
+                    for x in obj_type
+                )
+
+            obj_type = str(
+                obj_type
+            ).lower()
+
+            if (
+                "article" not in obj_type
+                and "news" not in obj_type
+            ):
+                continue
+
+            for key in [
+                "datePublished",
+                "dateCreated",
+                "dateModified",
+            ]:
+                value = obj.get(key)
+
+                parsed = _parse_datetime(
+                    value
+                )
+
+                if parsed:
+                    return parsed
+
+    return None
+
+
+def _extract_article_datetime_from_html(
+    soup: BeautifulSoup,
+):
+    """
+    استخراج وقت النشر الحقيقي من صفحة المقال.
+
+    الأولوية:
+    1. JSON-LD datePublished
+    2. meta article:published_time
+    3. meta datePublished / publish date
+    4. عناصر time
+    5. عناصر تحمل مؤشرات واضحة للنشر
+    6. النص الظاهر القريب من المقال
+    """
+
+    # -------------------------------------------------
+    # 1) JSON-LD
+    # -------------------------------------------------
+
+    parsed = _parse_jsonld_datetime(
+        soup
+    )
+
+    if parsed:
+        return parsed, "jsonld"
+
+    # -------------------------------------------------
+    # 2) Meta tags
+    # -------------------------------------------------
+
+    meta_names = [
+        ("property", "article:published_time"),
+        ("property", "og:published_time"),
+        ("name", "article:published_time"),
+        ("name", "datePublished"),
+        ("name", "publishdate"),
+        ("name", "published"),
+        ("name", "publication_date"),
+    ]
+
+    for attr, name in meta_names:
+        tag = soup.find(
+            "meta",
+            attrs={
+                attr: name
+            },
+        )
+
+        if not tag:
+            continue
+
+        value = tag.get("content")
+
+        parsed = _parse_datetime(value)
+
+        if parsed:
+            return parsed, f"meta:{name}"
+
+        parsed = _parse_visible_datetime(
+            value
+        )
+
+        if parsed:
+            return parsed, f"meta:{name}"
+
+    # -------------------------------------------------
+    # 3) عناصر time
+    # -------------------------------------------------
+
+    for time_tag in soup.find_all("time"):
+        parsed = _extract_datetime_from_node_attributes(
+            time_tag
+        )
+
+        if parsed:
+            return parsed, "time_attribute"
+
+        text = time_tag.get_text(
+            " ",
+            strip=True,
+        )
+
+        parsed = _parse_visible_datetime(
+            text
+        )
+
+        if parsed:
+            return parsed, "time_text"
+
+    # -------------------------------------------------
+    # 4) البحث في العناصر التي تحمل أسماء مرتبطة
+    # بالنشر أو التاريخ.
+    # -------------------------------------------------
+
+    date_keywords = [
+        "published",
+        "publish",
+        "datepublished",
+        "publication",
+        "تاريخ النشر",
+        "تاريخ-النشر",
+        "وقت النشر",
+        "وقت-النشر",
+        "نشر",
+    ]
+
+    for tag in soup.find_all(True):
+        classes = " ".join(
+            tag.get("class", [])
+        ).lower()
+
+        tag_id = str(
+            tag.get("id", "")
+        ).lower()
+
+        marker = f"{classes} {tag_id}"
+
+        if not any(
+            keyword in marker
+            for keyword in date_keywords
+        ):
+            continue
+
+        parsed = _extract_datetime_from_node_attributes(
+            tag
+        )
+
+        if parsed:
+            return parsed, "published_element_attribute"
+
+        text = tag.get_text(
+            " ",
+            strip=True,
+        )
+
+        if len(text) > 150:
+            continue
+
+        parsed = _parse_visible_datetime(
+            text
+        )
+
+        if parsed:
+            return parsed, "published_element_text"
+
+    return None, None
+
+
+# ============================================================
+# التحقق من أن الصفحة مقال إخباري فعلًا
+# ============================================================
+
+def _is_actual_news_article(
+    soup: BeautifulSoup,
+) -> bool:
+    """
+    يمنع اعتبار صفحات المباريات أو الصفحات العامة
+    مقالات لمجرد وجود تاريخ فيها.
+    """
+
+    # -------------------------------------------------
+    # 1) JSON-LD
+    # -------------------------------------------------
+
+    for script in soup.find_all(
+        "script",
+        type="application/ld+json",
+    ):
+        raw = script.string or script.get_text(
+            strip=True
+        )
+
+        if not raw:
+            continue
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        objects = []
+
+        if isinstance(data, dict):
+            objects.append(data)
+
+            graph = data.get("@graph")
+
+            if isinstance(graph, list):
+                objects.extend(graph)
+
+        elif isinstance(data, list):
+            objects.extend(data)
+
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+
+            obj_type = obj.get("@type", "")
+
+            if isinstance(
+                obj_type,
+                list,
+            ):
+                types = [
+                    str(x).lower()
+                    for x in obj_type
+                ]
+            else:
+                types = [
+                    str(obj_type).lower()
+                ]
+
+            if any(
+                x in {
+                    "newsarticle",
+                    "article",
+                    "reportage",
+                }
+                for x in types
+            ):
+                return True
+
+    # -------------------------------------------------
+    # 2) عناصر المقال
+    # -------------------------------------------------
+
+    if soup.find("article"):
+        return True
+
+    # -------------------------------------------------
+    # 3) مؤشرات واضحة على أن الصفحة تحتوي عنوان مقال
+    # -------------------------------------------------
+
+    headline = soup.find(
+        attrs={
+            "itemprop": "headline"
+        }
+    )
+
+    if headline:
+        return True
+
+    for meta_name in [
+        "og:type",
+        "twitter:card",
+    ]:
+        tag = soup.find(
+            "meta",
+            attrs={
+                "property": meta_name
+            },
+        ) or soup.find(
+            "meta",
+            attrs={
+                "name": meta_name
+            },
+        )
+
+        if tag:
+            value = str(
+                tag.get("content", "")
+            ).lower()
+
+            if value in {
+                "article",
+                "news",
+            }:
+                return True
+
+    return False
+
+
+# ============================================================
+# التحقق الكامل من صفحة الخبر
+# ============================================================
+
+def _verify_article_page(
+    url: str,
+    cycle_start: datetime,
+    max_age: int,
+):
+    """
+    يفتح صفحة الخبر نفسها ويقرر:
+    - هل هي مقال؟
+    - ما وقت النشر الحقيقي؟
+    - هل يقع ضمن آخر 3 ساعات؟
+    """
+
+    try:
+        raw_data, resolved_url = _fetch_url(
+            url
+        )
+
+        soup = BeautifulSoup(
+            raw_data,
+            "html.parser",
+        )
+
+    except Exception as e:
+        print(
+            f"   ⚠️ تعذر فتح صفحة الخبر للتحقق: {e}"
+        )
+
+        return None
+
+    # -------------------------------------------------
+    # التحقق من الرابط النهائي
+    # -------------------------------------------------
+
+    if not _article_url(
+        resolved_url
+    ):
+        print(
+            "   🚫 الرابط النهائي ليس رابط مقال:"
+        )
+        print(
+            f"      {resolved_url}"
+        )
+
+        return None
+
+    # -------------------------------------------------
+    # التحقق من نوع الصفحة
+    # -------------------------------------------------
+
+    if not _is_actual_news_article(
+        soup
+    ):
+        print(
+            "   🚫 الصفحة ليست مقالًا إخباريًا."
+        )
+
+        return None
+
+    # -------------------------------------------------
+    # استخراج التاريخ الحقيقي
+    # -------------------------------------------------
+
+    published_dt, method = (
+        _extract_article_datetime_from_html(
+            soup
+        )
+    )
+
+    if not published_dt:
+        print(
+            "   ⚠️ الصفحة تبدو مقالًا، "
+            "لكن تعذر تحديد وقت النشر الحقيقي."
+        )
+
+        return None
+
+    # -------------------------------------------------
+    # التحقق النهائي من نافذة الـ3 ساعات
+    # -------------------------------------------------
+
+    if not _is_recent(
+        published_dt,
+        cycle_start,
+        max_age,
+    ):
+        print(
+            "   ⏭️ المقال قديم خارج نافذة الـ3 ساعات."
+        )
+
+        print(
+            f"      وقت النشر الحقيقي: "
+            f"{published_dt.isoformat()}"
+        )
+
+        return None
+
+    return {
+        "published_dt": published_dt,
+        "resolved_url": resolved_url,
+        "date_method": method,
+    }
+
+
+# ============================================================
+# تحليل صفحات قائمة كووورة
+# ============================================================
+
 def _parse_kooora_page(
     raw_data: bytes,
     source_name: str,
 ) -> list:
+
     soup = BeautifulSoup(
         raw_data,
         "html.parser",
@@ -671,6 +1178,7 @@ def _parse_kooora_page(
     article_candidates = 0
     parsed_times = 0
     missing_times = 0
+    rejected_non_articles = 0
 
     for anchor in soup.find_all(
         "a",
@@ -691,15 +1199,21 @@ def _parse_kooora_page(
             href,
         )
 
-        if not _article_url(link):
-            continue
-
-        article_candidates += 1
-
         link = link.split(
             "#",
             1,
         )[0]
+
+        # -------------------------------------------------
+        # استبعاد الروابط غير الإخبارية
+        # قبل استخراج الوقت.
+        # -------------------------------------------------
+
+        if not _article_url(link):
+            rejected_non_articles += 1
+            continue
+
+        article_candidates += 1
 
         if link in seen:
             continue
@@ -724,35 +1238,38 @@ def _parse_kooora_page(
             anchor
         )
 
+        # الوقت الموجود في القائمة ليس موثوقًا
+        # بما يكفي لاعتماده نهائيًا.
         if not published_dt:
             missing_times += 1
 
-            # تشخيص محدود حتى لا يمتلئ GitHub Actions
-            # بآلاف الأسطر.
             if missing_times <= 10:
                 print(
-                    "⚠️ تم اكتشاف رابط خبر لكن "
-                    "تعذر استخراج وقت النشر:"
+                    "⚠️ تم اكتشاف رابط محتمل لمقال "
+                    "لكن تعذر استخراج وقت القائمة:"
                 )
+
                 print(
                     f"   🔗 {link}"
                 )
+
                 print(
                     f"   📰 {title[:180]}"
                 )
 
+            # لا نستبعده مباشرة.
+            # سيتمكن النظام من التحقق منه لاحقًا
+            # إذا احتجنا لذلك.
             continue
 
         parsed_times += 1
-
         seen.add(link)
 
         results.append(
             {
                 "title": title,
                 "link": link,
-                "published": published_dt.isoformat(),
-                "published_dt": published_dt,
+                "list_published_dt": published_dt,
                 "source": source_name,
                 "matched_keyword": source_name,
             }
@@ -763,24 +1280,20 @@ def _parse_kooora_page(
         f"anchors={total_anchors}, "
         f"article_candidates={article_candidates}, "
         f"parsed_times={parsed_times}, "
-        f"missing_times={missing_times}"
+        f"missing_times={missing_times}, "
+        f"rejected_non_articles={rejected_non_articles}"
     )
 
     return results
 
 
-def _kooora_page_url(page: int) -> str:
-    """
-    إنشاء رابط صفحة كووورة الصحيح.
+# ============================================================
+# روابط صفحات كووورة
+# ============================================================
 
-    الصفحة الأولى:
-        /news
-
-    الصفحات التالية في كووورة:
-        /أخبار/2
-        /أخبار/3
-        ...
-    """
+def _kooora_page_url(
+    page: int,
+) -> str:
 
     if page <= 1:
         return KOOORA_NEWS
@@ -797,11 +1310,15 @@ def _kooora_page_url(page: int) -> str:
     )
 
 
+# ============================================================
+# الجلب المباشر من كووورة
+# ============================================================
+
 def _fetch_kooora_direct(
     cycle_start: datetime,
-    max_age: int,
     pages: int,
 ) -> list:
+
     all_news = []
     seen_links = set()
     seen_titles = set()
@@ -810,6 +1327,7 @@ def _fetch_kooora_direct(
         1,
         pages + 1,
     ):
+
         url = _kooora_page_url(
             page
         )
@@ -820,7 +1338,7 @@ def _fetch_kooora_direct(
                 f"{url}"
             )
 
-            raw_data = _fetch_url(
+            raw_data, _ = _fetch_url(
                 url
             )
 
@@ -837,32 +1355,46 @@ def _fetch_kooora_direct(
             page_recent = 0
             page_old = 0
             page_processed = 0
+            page_verified = 0
+            page_verification_failed = 0
 
             for item in page_news:
+
                 link = item["link"]
                 title = item["title"]
 
                 if link in seen_links:
                     continue
 
-                normalized_title = re.sub(
-                    r"\s+",
-                    " ",
-                    title.strip(),
-                ).lower()
+                normalized_title = (
+                    _normalize_title(title)
+                )
 
                 if normalized_title in seen_titles:
                     continue
 
-                if not _is_recent(
-                    item.get("published_dt"),
+                list_dt = item.get(
+                    "list_published_dt"
+                )
+
+                # -------------------------------------------------
+                # الفلتر الأولي فقط.
+                #
+                # نستخدم 9 ساعات بدل 3 لأن وقت القائمة
+                # قد يكون متأخرًا/مختلفًا عن وقت المقال.
+                # -------------------------------------------------
+
+                if list_dt and not _is_recent(
+                    list_dt,
                     cycle_start,
-                    max_age,
+                    PRECHECK_MAX_AGE_HOURS,
                 ):
                     page_old += 1
                     continue
 
-                page_recent += 1
+                # -------------------------------------------------
+                # منع ما تم معالجته سابقًا.
+                # -------------------------------------------------
 
                 if db.is_processed(
                     link,
@@ -871,19 +1403,97 @@ def _fetch_kooora_direct(
                     page_processed += 1
                     continue
 
+                # -------------------------------------------------
+                # التحقق الحقيقي من صفحة الخبر.
+                #
+                # هذه هي النقطة الأساسية الجديدة.
+                # -------------------------------------------------
+
+                print(
+                    "\n🔎 التحقق من صفحة الخبر:"
+                )
+
+                print(
+                    f"   📰 {title[:180]}"
+                )
+
+                print(
+                    f"   🔗 {link}"
+                )
+
+                verified = _verify_article_page(
+                    link,
+                    cycle_start,
+                    FINAL_MAX_AGE_HOURS,
+                )
+
+                if not verified:
+                    page_verification_failed += 1
+                    continue
+
+                real_published_dt = verified[
+                    "published_dt"
+                ]
+
+                resolved_url = verified[
+                    "resolved_url"
+                ]
+
+                page_verified += 1
+
+                print(
+                    "   ✅ تم التأكد من أن الصفحة "
+                    "مقال إخباري حديث."
+                )
+
+                print(
+                    f"   🕐 وقت النشر الحقيقي: "
+                    f"{real_published_dt.isoformat()}"
+                )
+
+                print(
+                    f"   🔍 مصدر الوقت: "
+                    f"{verified['date_method']}"
+                )
+
+                # -------------------------------------------------
+                # تحقق نهائي إضافي.
+                # -------------------------------------------------
+
+                if not _is_recent(
+                    real_published_dt,
+                    cycle_start,
+                    FINAL_MAX_AGE_HOURS,
+                ):
+                    continue
+
                 seen_links.add(link)
                 seen_titles.add(
                     normalized_title
                 )
 
-                all_news.append(item)
+                all_news.append(
+                    {
+                        "title": title,
+                        "link": link,
+                        "published": real_published_dt.isoformat(),
+                        "published_dt": real_published_dt,
+                        "source": "Kooora",
+                        "matched_keyword": "Kooora",
+                        "resolved_url": resolved_url,
+                    }
+                )
+
+                page_recent += 1
 
             print(
                 f"📊 صفحة {page}: "
                 f"articles={len(page_news)}, "
-                f"recent={page_recent}, "
+                f"verified_recent={page_recent}, "
+                f"verified={page_verified}, "
                 f"already_processed={page_processed}, "
-                f"outside_window={page_old}"
+                f"outside_precheck={page_old}, "
+                f"verification_failed={page_verification_failed}"
             )
 
         except Exception as e:
@@ -895,10 +1505,15 @@ def _fetch_kooora_direct(
     return all_news
 
 
+# ============================================================
+# Google News كخطة احتياطية
+# ============================================================
+
 def _fetch_google_news_fallback(
     cycle_start: datetime,
     max_age: int,
 ) -> list:
+
     sources = CONFIG.get(
         "rss_sources",
         [],
@@ -909,6 +1524,7 @@ def _fetch_google_news_fallback(
     seen_titles = set()
 
     for source in sources:
+
         source_name = source.get(
             "name",
             "Google News Fallback",
@@ -922,7 +1538,7 @@ def _fetch_google_news_fallback(
             continue
 
         try:
-            raw_data = _fetch_url(
+            raw_data, _ = _fetch_url(
                 source_url
             )
 
@@ -931,6 +1547,7 @@ def _fetch_google_news_fallback(
             )
 
             for entry in feed.entries:
+
                 raw_title = entry.get(
                     "title",
                     "",
@@ -948,11 +1565,11 @@ def _fetch_google_news_fallback(
                     raw_title
                 )
 
-                normalized_title = re.sub(
-                    r"\s+",
-                    " ",
-                    clean_title.strip(),
-                ).lower()
+                normalized_title = (
+                    _normalize_title(
+                        clean_title
+                    )
+                )
 
                 if link in seen_links:
                     continue
@@ -967,8 +1584,12 @@ def _fetch_google_news_fallback(
                     continue
 
                 published_parsed = (
-                    entry.get("published_parsed")
-                    or entry.get("updated_parsed")
+                    entry.get(
+                        "published_parsed"
+                    )
+                    or entry.get(
+                        "updated_parsed"
+                    )
                 )
 
                 if not published_parsed:
@@ -979,8 +1600,51 @@ def _fetch_google_news_fallback(
                         *published_parsed[:6],
                         tzinfo=timezone.utc,
                     )
+
                 except Exception:
                     continue
+
+                if not _is_recent(
+                    published_dt,
+                    cycle_start,
+                    max_age,
+                ):
+                    continue
+
+                # -------------------------------------------------
+                # إذا كان الرابط من كووورة، نتحقق من الصفحة نفسها.
+                # -------------------------------------------------
+
+                if "kooora.com" in (
+                    urllib.parse.urlparse(
+                        link
+                    ).netloc.lower()
+                ):
+                    print(
+                        "\n🔎 التحقق من خبر Google News "
+                        "من صفحة كووورة الأصلية:"
+                    )
+
+                    print(
+                        f"   📰 {clean_title[:180]}"
+                    )
+
+                    verified = _verify_article_page(
+                        link,
+                        cycle_start,
+                        max_age,
+                    )
+
+                    if not verified:
+                        continue
+
+                    published_dt = verified[
+                        "published_dt"
+                    ]
+
+                    link = verified[
+                        "resolved_url"
+                    ]
 
                 if not _is_recent(
                     published_dt,
@@ -998,10 +1662,7 @@ def _fetch_google_news_fallback(
                     {
                         "title": clean_title,
                         "link": link,
-                        "published": entry.get(
-                            "published",
-                            "",
-                        ),
+                        "published": published_dt.isoformat(),
                         "published_dt": published_dt,
                         "source": source_name,
                         "matched_keyword": "Kooora",
@@ -1016,16 +1677,18 @@ def _fetch_google_news_fallback(
     return all_news
 
 
+# ============================================================
+# الدالة الرئيسية
+# ============================================================
+
 def fetch_prioritized_news(
     cycle_start: datetime | None = None,
 ) -> list:
+
     settings = CONFIG.get(
         "fetch_settings",
         {},
     )
-
-    # الإبقاء على نافذة آخر 3 ساعات.
-    max_age = 3
 
     if cycle_start is None:
         cycle_start = datetime.now(
@@ -1043,7 +1706,9 @@ def fetch_prioritized_news(
 
     cutoff = (
         cycle_start
-        - timedelta(hours=max_age)
+        - timedelta(
+            hours=FINAL_MAX_AGE_HOURS
+        )
     )
 
     pages = settings.get(
@@ -1051,9 +1716,9 @@ def fetch_prioritized_news(
         6,
     )
 
-    # ضمان أن عدد الصفحات رقم صحيح وموجب.
     try:
         pages = int(pages)
+
     except Exception:
         pages = 6
 
@@ -1067,8 +1732,23 @@ def fetch_prioritized_news(
     )
 
     print(
-        "⏱️ نافذة الفحص: آخر 3 ساعات "
+        "⏱️ نافذة النشر النهائية: آخر 3 ساعات "
         "من وقت بدء الدورة."
+    )
+
+    print(
+        "🔍 نافذة الفلترة الأولية من القائمة: "
+        "آخر 9 ساعات."
+    )
+
+    print(
+        "ℹ️ الوقت الموجود في صفحة القائمة "
+        "ليس وقت الاعتماد النهائي."
+    )
+
+    print(
+        "ℹ️ سيتم فتح صفحة الخبر نفسها "
+        "للتحقق من وقت النشر الحقيقي."
     )
 
     print(
@@ -1077,28 +1757,29 @@ def fetch_prioritized_news(
     )
 
     print(
-        f"🕐 بداية النافذة: "
+        f"🕐 بداية النافذة النهائية: "
         f"{cutoff.isoformat()}"
     )
 
     direct_news = _fetch_kooora_direct(
         cycle_start,
-        max_age,
         pages,
     )
 
     if direct_news:
+
         all_news = direct_news
 
         print(
             f"✅ تم العثور على {len(direct_news)} "
-            "خبرًا من كووورة مباشرة ضمن النافذة الزمنية."
+            "خبرًا حقيقيًا وحديثًا من كووورة."
         )
 
     else:
+
         print(
             "⚠️ لم يتم الحصول على أخبار مباشرة "
-            "ضمن النافذة الزمنية من كووورة."
+            "مقبولة من كووورة."
         )
 
         print(
@@ -1108,28 +1789,67 @@ def fetch_prioritized_news(
 
         all_news = _fetch_google_news_fallback(
             cycle_start,
-            max_age,
+            FINAL_MAX_AGE_HOURS,
         )
 
-    all_news = [
-        news
-        for news in all_news
-        if _is_recent(
-            news.get("published_dt"),
+    # -------------------------------------------------
+    # فلترة نهائية إضافية قبل التسليم إلى main.py
+    # -------------------------------------------------
+
+    final_news = []
+
+    for news in all_news:
+
+        published_dt = news.get(
+            "published_dt"
+        )
+
+        if not published_dt:
+            continue
+
+        if not _is_recent(
+            published_dt,
             cycle_start,
-            max_age,
-        )
-    ]
+            FINAL_MAX_AGE_HOURS,
+        ):
+            continue
 
-    all_news.sort(
+        final_news.append(
+            news
+        )
+
+    final_news.sort(
         key=lambda x: x["published_dt"],
         reverse=True,
     )
 
-    for news in all_news:
+    # -------------------------------------------------
+    # تنظيف الحقول الداخلية.
+    # -------------------------------------------------
+
+    for news in final_news:
         news.pop(
             "published_dt",
             None,
         )
 
-    return all_news
+        news.pop(
+            "list_published_dt",
+            None,
+        )
+
+    print(
+        "\n📊 النتيجة النهائية:"
+    )
+
+    print(
+        f"📰 الأخبار المقبولة: "
+        f"{len(final_news)}"
+    )
+
+    print(
+        "⏱️ جميع الأخبار المقبولة تم التحقق "
+        "من وقت نشرها من صفحة الخبر نفسها."
+    )
+
+    return final_news
