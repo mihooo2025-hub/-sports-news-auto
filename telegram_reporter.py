@@ -5,6 +5,8 @@ Sends a summary report to a Telegram group via Bot after each execution cycle:
 - Titles of rewritten and published articles.
 - Links to original source articles and published site articles.
 - Number of articles that failed or were skipped during processing.
+- Number and titles of articles excluded because their source title
+  contained a blocked phrase.
 
 Requires Telegram Bot Token (from BotFather) and Group ID (chat_id) in config.json
 or provided via environment variables (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).
@@ -19,7 +21,7 @@ BOT_TOKEN = TG.get("bot_token", "")
 CHAT_ID = TG.get("chat_id", "")
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-MAX_MESSAGE_LENGTH = 3800  # Safety buffer below Telegram's 4096 limit
+MAX_MESSAGE_LENGTH = 3800
 
 
 def _is_configured() -> bool:
@@ -75,6 +77,7 @@ def send_cycle_report(
     published_items: list,
     checked_count: int,
     skipped_count: int,
+    filtered_title_items: list | None = None,
 ):
     """
     published_items:
@@ -90,6 +93,10 @@ def send_cycle_report(
 
     skipped_count:
         عدد الأخبار التي فشلت أو تم تجاوزها أثناء الدورة.
+
+    filtered_title_items:
+        الأخبار التي تم استبعادها لأن عنوان الخبر الأصلي
+        يحتوي على إحدى عبارات الفلترة.
     """
 
     if not _is_configured():
@@ -99,73 +106,125 @@ def send_cycle_report(
         )
         return
 
-    # في حالة عدم نشر أي خبر.
-    if not published_items:
-        _send_message(
-            f"📊 <b>تقرير دورة الأخبار</b>\n\n"
-            f"🔍 تم فحص: {checked_count} خبر\n"
-            f"❌ فشل/تجاوز: {skipped_count} خبر\n"
-            f"✅ تم النشر: 0 خبر\n\n"
-            f"لم يُنشر أي خبر جديد في هذه الدورة."
-        )
-        return
+    filtered_title_items = (
+        filtered_title_items
+        or []
+    )
+
+    # ======================================================
+    # رأس التقرير
+    # ======================================================
 
     header = (
         f"📊 <b>تقرير دورة الأخبار</b>\n"
         f"✅ نُشر: {len(published_items)} | "
         f"🔍 فُحص: {checked_count} | "
         f"❌ فشل/تجاوز: {skipped_count}\n"
+        f"🚫 استُبعد بسبب العنوان: "
+        f"{len(filtered_title_items)}\n"
     )
 
     lines = []
 
-    for i, item in enumerate(
-        published_items,
-        start=1,
-    ):
-        title = item.get(
-            "title",
-            "بدون عنوان",
-        )
+    # ======================================================
+    # الأخبار المنشورة
+    # ======================================================
 
-        source_url = item.get(
-            "source_url",
-            "غير متوفر",
-        )
-
-        site_url = (
-            item.get("site_url")
-            or item.get("post_url")
-            or "غير متوفر"
-        )
-
-        title = html.escape(
-            str(title)
-        )
-
-        if source_url and source_url != "غير متوفر":
-            source_link = (
-                f'<a href="'
-                f'{html.escape(str(source_url), quote=True)}'
-                f'">رابط الخبر الأصلي</a>'
-            )
-        else:
-            source_link = "غير متوفر"
-
-        if site_url and site_url != "غير متوفر":
-            site_link = (
-                f'<a href="'
-                f'{html.escape(str(site_url), quote=True)}'
-                f'">رابط الخبر الجديد</a>'
-            )
-        else:
-            site_link = "غير متوفر"
+    if published_items:
 
         lines.append(
-            f"\n{i}. <b>{title}</b>\n"
-            f"🔗 المصدر الأصلي: {source_link}\n"
-            f"🌐 الخبر الجديد: {site_link}"
+            "\n<b>📰 الأخبار المنشورة:</b>"
         )
+
+        for i, item in enumerate(
+            published_items,
+            start=1,
+        ):
+            title = item.get(
+                "title",
+                "بدون عنوان",
+            )
+
+            source_url = item.get(
+                "source_url",
+                "غير متوفر",
+            )
+
+            site_url = (
+                item.get("site_url")
+                or item.get("post_url")
+                or "غير متوفر"
+            )
+
+            title = html.escape(
+                str(title)
+            )
+
+            if (
+                source_url
+                and source_url != "غير متوفر"
+            ):
+                source_link = (
+                    f'<a href="'
+                    f'{html.escape(str(source_url), quote=True)}'
+                    f'">رابط الخبر الأصلي</a>'
+                )
+            else:
+                source_link = "غير متوفر"
+
+            if (
+                site_url
+                and site_url != "غير متوفر"
+            ):
+                site_link = (
+                    f'<a href="'
+                    f'{html.escape(str(site_url), quote=True)}'
+                    f'">رابط الخبر الجديد</a>'
+                )
+            else:
+                site_link = "غير متوفر"
+
+            lines.append(
+                f"\n{i}. <b>{title}</b>\n"
+                f"🔗 المصدر الأصلي: {source_link}\n"
+                f"🌐 الخبر الجديد: {site_link}"
+            )
+
+    else:
+        lines.append(
+            "\nلم يُنشر أي خبر جديد في هذه الدورة."
+        )
+
+    # ======================================================
+    # الأخبار المستبعدة بسبب العنوان
+    # ======================================================
+
+    if filtered_title_items:
+
+        lines.append(
+            "\n<b>🚫 أخبار مستبعدة بسبب عنوانها:</b>"
+        )
+
+        for i, item in enumerate(
+            filtered_title_items,
+            start=1,
+        ):
+            title = item.get(
+                "title",
+                "بدون عنوان",
+            )
+
+            title = html.escape(
+                str(title)
+            )
+
+            lines.append(
+                f"\n{i}. <b>{title}</b>"
+            )
+
+    # ======================================================
+    # إرسال التقرير
+    # ======================================================
 
     for chunk in _chunk_message(
         lines,
