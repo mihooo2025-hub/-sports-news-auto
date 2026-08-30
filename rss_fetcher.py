@@ -3,6 +3,15 @@ rss_fetcher.py
 ==============
 يجلب أخبار كووورة مباشرة، مع Google News RSS كخطة احتياطية.
 
+الأخبار الجديدة:
+- تعتمد نافذة آخر 3 ساعات من وقت النشر الحقيقي.
+
+الأخبار التي فشلت سابقًا:
+- يتم استعادتها من قاعدة البيانات.
+- تتم إعادة محاولة التحقق منها لمدة 6 ساعات.
+- لا تعتمد إعادة المحاولة على بقاء الخبر ظاهرًا في
+  صفحات كووورة الحالية.
+
 آلية التحقق:
 1. اكتشاف روابط المقالات من صفحات كووورة.
 2. استبعاد صفحات المباريات والفرق واللاعبين والفيديو والبث وغيرها.
@@ -12,10 +21,9 @@ rss_fetcher.py
 4. استخدام وقت القائمة كفلتر أولي واسع فقط.
 5. فتح صفحة الخبر نفسها للمرشحين.
 6. استخراج وقت النشر الحقيقي من صفحة المقال.
-7. اعتماد نافذة آخر 3 ساعات بناءً على وقت النشر الحقيقي.
-8. رفض أي صفحة لا يمكن التأكد أنها مقال إخباري أو لا يمكن تحديد
-   وقت نشرها الحقيقي.
-9. منع التكرار عبر الرابط والعنوان في قاعدة البيانات.
+7. اعتماد نافذة آخر 3 ساعات للأخبار الجديدة.
+8. الأخبار التي تفشل أثناء فتح صفحة الخبر أو التحقق منها
+   تحفظ في قاعدة البيانات لإعادة المحاولة لمدة 6 ساعات.
 """
 
 import html
@@ -45,12 +53,14 @@ KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
 )
 
-# نافذة النشر النهائية المطلوبة.
+# نافذة الأخبار الجديدة.
 FINAL_MAX_AGE_HOURS = 3
 
-# نستخدم نافذة أوسع فقط لاختيار المرشحين من صفحة القائمة.
-# لا تعني أن الخبر مقبول ضمن آخر 9 ساعات.
+# نافذة أوسع لاختيار المرشحين من صفحة القائمة.
 PRECHECK_MAX_AGE_HOURS = 9
+
+# مدة إعادة محاولة الأخبار التي فشلت.
+FAILED_RETRY_HOURS = 6
 
 
 # ============================================================
@@ -62,19 +72,11 @@ TITLE_FILTER_PHRASES = (
     "القناة الناقلة",
 )
 
-# يتم تخزين الأخبار التي تم استبعادها في هذه الدورة
-# حتى يتم إرسالها إلى تقرير Telegram.
 _FILTERED_TITLE_ITEMS = []
-
-# منع احتساب الخبر المستبعد أكثر من مرة إذا ظهر
-# في أكثر من صفحة أو أكثر من مصدر.
 _FILTERED_TITLE_KEYS = set()
 
 
 def _reset_title_filter_report():
-    """
-    تصفير قائمة الأخبار المستبعدة عند بداية كل دورة جلب.
-    """
     global _FILTERED_TITLE_ITEMS
     global _FILTERED_TITLE_KEYS
 
@@ -83,9 +85,6 @@ def _reset_title_filter_report():
 
 
 def _normalize_filter_title(title: str) -> str:
-    """
-    توحيد المسافات فقط قبل فحص عبارات الفلترة.
-    """
     if not title:
         return ""
 
@@ -101,11 +100,6 @@ def _normalize_filter_title(title: str) -> str:
 
 
 def _is_filtered_title(title: str) -> bool:
-    """
-    التحقق من عنوان الخبر الأصلي فقط.
-
-    لا يتم البحث داخل محتوى المقال.
-    """
     normalized_title = _normalize_filter_title(
         title
     )
@@ -121,9 +115,6 @@ def _record_filtered_title(
     link: str = "",
     source: str = "Kooora",
 ):
-    """
-    تسجيل خبر تم استبعاده بسبب عنوانه.
-    """
     global _FILTERED_TITLE_ITEMS
     global _FILTERED_TITLE_KEYS
 
@@ -170,10 +161,6 @@ def _record_filtered_title(
 
 
 def get_filtered_title_items() -> list:
-    """
-    إرجاع الأخبار التي تم استبعادها بسبب عنوانها
-    خلال دورة الجلب الحالية.
-    """
     return list(
         _FILTERED_TITLE_ITEMS
     )
@@ -212,7 +199,6 @@ ARABIC_DIGITS = str.maketrans(
 # ============================================================
 
 NON_ARTICLE_SEGMENTS = {
-    # مباريات
     "match",
     "matches",
     "game",
@@ -220,7 +206,6 @@ NON_ARTICLE_SEGMENTS = {
     "مباراة",
     "مباريات",
 
-    # بث مباشر
     "live",
     "livescore",
     "livescores",
@@ -228,32 +213,27 @@ NON_ARTICLE_SEGMENTS = {
     "بث",
     "مباشر",
 
-    # فيديو
     "video",
     "videos",
     "فيديو",
     "فيديوهات",
 
-    # صور
     "photo",
     "photos",
     "gallery",
     "صور",
     "معرض",
 
-    # فرق
     "team",
     "teams",
     "فريق",
     "فرق",
 
-    # لاعبون
     "player",
     "players",
     "لاعب",
     "لاعبين",
 
-    # بطولات
     "competition",
     "competitions",
     "tournament",
@@ -264,7 +244,6 @@ NON_ARTICLE_SEGMENTS = {
     "بطولات",
     "دوري",
 
-    # تصنيفات ونتائج
     "category",
     "categories",
     "tag",
@@ -276,7 +255,6 @@ NON_ARTICLE_SEGMENTS = {
     "نتائج",
     "مواعيد",
 
-    # صفحات عامة
     "search",
     "author",
     "authors",
@@ -381,15 +359,6 @@ def _parse_datetime(value: str):
 
 
 def _parse_visible_datetime(text: str):
-    """
-    استخراج التاريخ والوقت من النص العربي.
-
-    أمثلة:
-        09:46 20 أغسطس 2026
-        20 أغسطس 2026 09:46
-        09:4620 أغسطس 2026
-    """
-
     if not text:
         return None
 
@@ -432,6 +401,7 @@ def _parse_visible_datetime(text: str):
     ]
 
     for pattern in patterns:
+
         match = re.search(
             pattern,
             text,
@@ -441,6 +411,7 @@ def _parse_visible_datetime(text: str):
             continue
 
         try:
+
             groups = match.groups()
 
             if len(groups) != 5:
@@ -454,6 +425,7 @@ def _parse_visible_datetime(text: str):
                 day = int(groups[2])
                 month_name = groups[3]
                 year = int(groups[4])
+
             else:
                 day = int(groups[0])
                 month_name = groups[1]
@@ -503,10 +475,12 @@ def _is_recent(
     cycle_start: datetime,
     max_age_hours: int,
 ) -> bool:
+
     if not published_dt:
         return False
 
     try:
+
         if published_dt.tzinfo is None:
             published_dt = published_dt.replace(
                 tzinfo=timezone.utc
@@ -538,6 +512,7 @@ def _is_recent(
 # ============================================================
 
 def _extract_datetime_from_node_attributes(node):
+
     if node is None:
         return None
 
@@ -554,17 +529,22 @@ def _extract_datetime_from_node_attributes(node):
     ]
 
     for attribute in attributes:
+
         value = node.get(attribute)
 
         if not value:
             continue
 
-        parsed = _parse_datetime(value)
+        parsed = _parse_datetime(
+            value
+        )
 
         if parsed:
             return parsed
 
-        parsed = _parse_visible_datetime(value)
+        parsed = _parse_visible_datetime(
+            value
+        )
 
         if parsed:
             return parsed
@@ -573,10 +553,11 @@ def _extract_datetime_from_node_attributes(node):
 
 
 # ============================================================
-# وقت القائمة - يستخدم للفلترة الأولية فقط
+# وقت القائمة
 # ============================================================
 
 def _extract_entry_time(anchor):
+
     if anchor is None:
         return None
 
@@ -588,6 +569,7 @@ def _extract_entry_time(anchor):
         return parsed
 
     for time_tag in anchor.find_all("time"):
+
         value = (
             time_tag.get("datetime")
             or time_tag.get("content")
@@ -597,12 +579,16 @@ def _extract_entry_time(anchor):
             )
         )
 
-        parsed = _parse_datetime(value)
+        parsed = _parse_datetime(
+            value
+        )
 
         if parsed:
             return parsed
 
-        parsed = _parse_visible_datetime(value)
+        parsed = _parse_visible_datetime(
+            value
+        )
 
         if parsed:
             return parsed
@@ -622,6 +608,7 @@ def _extract_entry_time(anchor):
     parent = anchor.parent
 
     for _ in range(3):
+
         if parent is None:
             break
 
@@ -637,6 +624,7 @@ def _extract_entry_time(anchor):
         )
 
         if len(time_tags) == 1:
+
             time_tag = time_tags[0]
 
             value = (
@@ -648,12 +636,16 @@ def _extract_entry_time(anchor):
                 )
             )
 
-            parsed = _parse_datetime(value)
+            parsed = _parse_datetime(
+                value
+            )
 
             if parsed:
                 return parsed
 
-            parsed = _parse_visible_datetime(value)
+            parsed = _parse_visible_datetime(
+                value
+            )
 
             if parsed:
                 return parsed
@@ -663,6 +655,7 @@ def _extract_entry_time(anchor):
     direct_parent = anchor.parent
 
     if direct_parent is not None:
+
         parent_text = direct_parent.get_text(
             " ",
             strip=True,
@@ -683,7 +676,9 @@ def _extract_entry_time(anchor):
 # ============================================================
 
 def _article_url(url: str) -> bool:
+
     try:
+
         parsed = urllib.parse.urlparse(url)
 
         if parsed.netloc.lower() not in {
@@ -704,11 +699,6 @@ def _article_url(url: str) -> bool:
 
         if len(parts) < 2:
             return False
-
-        lower_parts = {
-            part.lower()
-            for part in parts
-        }
 
         if path.lower() in {
             "/news",
@@ -791,16 +781,18 @@ def _article_url(url: str) -> bool:
 
 
 # ============================================================
-# استخراج وقت النشر الحقيقي من صفحة الخبر
+# استخراج وقت النشر الحقيقي
 # ============================================================
 
 def _parse_jsonld_datetime(
     soup: BeautifulSoup,
 ):
+
     for script in soup.find_all(
         "script",
         type="application/ld+json",
     ):
+
         raw = script.string or script.get_text(
             strip=True
         )
@@ -816,6 +808,7 @@ def _parse_jsonld_datetime(
         objects = []
 
         if isinstance(data, dict):
+
             objects.append(data)
 
             graph = data.get("@graph")
@@ -827,6 +820,7 @@ def _parse_jsonld_datetime(
             objects.extend(data)
 
         for obj in objects:
+
             if not isinstance(obj, dict):
                 continue
 
@@ -856,6 +850,7 @@ def _parse_jsonld_datetime(
                 "dateCreated",
                 "dateModified",
             ]:
+
                 value = obj.get(key)
 
                 parsed = _parse_datetime(
@@ -871,17 +866,6 @@ def _parse_jsonld_datetime(
 def _extract_article_datetime_from_html(
     soup: BeautifulSoup,
 ):
-    """
-    استخراج وقت النشر الحقيقي من صفحة المقال.
-
-    الأولوية:
-    1. JSON-LD datePublished
-    2. meta article:published_time
-    3. meta datePublished / publish date
-    4. عناصر time
-    5. عناصر تحمل مؤشرات واضحة للنشر
-    6. النص الظاهر القريب من المقال
-    """
 
     parsed = _parse_jsonld_datetime(
         soup
@@ -901,6 +885,7 @@ def _extract_article_datetime_from_html(
     ]
 
     for attr, name in meta_names:
+
         tag = soup.find(
             "meta",
             attrs={
@@ -913,7 +898,9 @@ def _extract_article_datetime_from_html(
 
         value = tag.get("content")
 
-        parsed = _parse_datetime(value)
+        parsed = _parse_datetime(
+            value
+        )
 
         if parsed:
             return parsed, f"meta:{name}"
@@ -926,6 +913,7 @@ def _extract_article_datetime_from_html(
             return parsed, f"meta:{name}"
 
     for time_tag in soup.find_all("time"):
+
         parsed = _extract_datetime_from_node_attributes(
             time_tag
         )
@@ -958,6 +946,7 @@ def _extract_article_datetime_from_html(
     ]
 
     for tag in soup.find_all(True):
+
         classes = " ".join(
             tag.get("class", [])
         ).lower()
@@ -1000,7 +989,7 @@ def _extract_article_datetime_from_html(
 
 
 # ============================================================
-# التحقق من أن الصفحة مقال إخباري فعلًا
+# التحقق من أن الصفحة مقال إخباري
 # ============================================================
 
 def _is_actual_news_article(
@@ -1011,6 +1000,7 @@ def _is_actual_news_article(
         "script",
         type="application/ld+json",
     ):
+
         raw = script.string or script.get_text(
             strip=True
         )
@@ -1026,6 +1016,7 @@ def _is_actual_news_article(
         objects = []
 
         if isinstance(data, dict):
+
             objects.append(data)
 
             graph = data.get("@graph")
@@ -1037,6 +1028,7 @@ def _is_actual_news_article(
             objects.extend(data)
 
         for obj in objects:
+
             if not isinstance(obj, dict):
                 continue
 
@@ -1046,11 +1038,14 @@ def _is_actual_news_article(
                 obj_type,
                 list,
             ):
+
                 types = [
                     str(x).lower()
                     for x in obj_type
                 ]
+
             else:
+
                 types = [
                     str(obj_type).lower()
                 ]
@@ -1081,6 +1076,7 @@ def _is_actual_news_article(
         "og:type",
         "twitter:card",
     ]:
+
         tag = soup.find(
             "meta",
             attrs={
@@ -1094,6 +1090,7 @@ def _is_actual_news_article(
         )
 
         if tag:
+
             value = str(
                 tag.get("content", "")
             ).lower()
@@ -1118,6 +1115,7 @@ def _verify_article_page(
 ):
 
     try:
+
         raw_data, resolved_url = _fetch_url(
             url
         )
@@ -1128,15 +1126,21 @@ def _verify_article_page(
         )
 
     except Exception as e:
+
         print(
             f"   ⚠️ تعذر فتح صفحة الخبر للتحقق: {e}"
         )
 
-        return None
+        return {
+            "success": False,
+            "retryable": True,
+            "reason": "fetch_failed",
+        }
 
     if not _article_url(
         resolved_url
     ):
+
         print(
             "   🚫 الرابط النهائي ليس رابط مقال:"
         )
@@ -1145,16 +1149,25 @@ def _verify_article_page(
             f"      {resolved_url}"
         )
 
-        return None
+        return {
+            "success": False,
+            "retryable": False,
+            "reason": "not_article_url",
+        }
 
     if not _is_actual_news_article(
         soup
     ):
+
         print(
             "   🚫 الصفحة ليست مقالًا إخباريًا."
         )
 
-        return None
+        return {
+            "success": False,
+            "retryable": False,
+            "reason": "not_news_article",
+        }
 
     published_dt, method = (
         _extract_article_datetime_from_html(
@@ -1163,18 +1176,24 @@ def _verify_article_page(
     )
 
     if not published_dt:
+
         print(
             "   ⚠️ الصفحة تبدو مقالًا، "
             "لكن تعذر تحديد وقت النشر الحقيقي."
         )
 
-        return None
+        return {
+            "success": False,
+            "retryable": True,
+            "reason": "missing_publish_time",
+        }
 
     if not _is_recent(
         published_dt,
         cycle_start,
         max_age,
     ):
+
         print(
             "   ⏭️ المقال قديم خارج نافذة الـ3 ساعات."
         )
@@ -1184,9 +1203,15 @@ def _verify_article_page(
             f"{published_dt.isoformat()}"
         )
 
-        return None
+        return {
+            "success": False,
+            "retryable": False,
+            "reason": "outside_final_window",
+        }
 
     return {
+        "success": True,
+        "retryable": False,
         "published_dt": published_dt,
         "resolved_url": resolved_url,
         "date_method": method,
@@ -1221,6 +1246,7 @@ def _parse_kooora_page(
         "a",
         href=True,
     ):
+
         total_anchors += 1
 
         href = anchor.get(
@@ -1242,6 +1268,7 @@ def _parse_kooora_page(
         )[0]
 
         if not _article_url(link):
+
             rejected_non_articles += 1
             continue
 
@@ -1268,16 +1295,10 @@ def _parse_kooora_page(
         if len(title) < 10:
             continue
 
-        # -------------------------------------------------
-        # فلترة العنوان فقط.
-        #
-        # مهم:
-        # لا يتم فحص محتوى الخبر هنا أو لاحقًا لهذا السبب.
-        # -------------------------------------------------
-
         if _is_filtered_title(
             title
         ):
+
             filtered_titles += 1
 
             _record_filtered_title(
@@ -1292,12 +1313,12 @@ def _parse_kooora_page(
             anchor
         )
 
-        # الوقت الموجود في القائمة ليس موثوقًا
-        # بما يكفي لاعتماده نهائيًا.
         if not published_dt:
+
             missing_times += 1
 
             if missing_times <= 10:
+
                 print(
                     "⚠️ تم اكتشاف رابط محتمل لمقال "
                     "لكن تعذر استخراج وقت القائمة:"
@@ -1310,6 +1331,18 @@ def _parse_kooora_page(
                 print(
                     f"   📰 {title[:180]}"
                 )
+
+            # لا نحذف الخبر نهائيًا.
+            # نرسله للتحقق المباشر من صفحة الخبر.
+            results.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "list_published_dt": None,
+                    "source": source_name,
+                    "matched_keyword": source_name,
+                }
+            )
 
             continue
 
@@ -1362,6 +1395,35 @@ def _kooora_page_url(
 
 
 # ============================================================
+# تسجيل فشل قابل لإعادة المحاولة
+# ============================================================
+
+def _save_retryable_failure(
+    link: str,
+    title: str,
+):
+
+    try:
+
+        db.mark_processed(
+            url=link,
+            title=title,
+            status="publish_failed",
+        )
+
+        print(
+            "💾 تم حفظ الخبر كفشل قابل لإعادة المحاولة "
+            "لمدة 6 ساعات."
+        )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ تعذر حفظ الخبر الفاشل في قاعدة البيانات: {e}"
+        )
+
+
+# ============================================================
 # الجلب المباشر من كووورة
 # ============================================================
 
@@ -1384,6 +1446,7 @@ def _fetch_kooora_direct(
         )
 
         try:
+
             print(
                 f"🌐 فحص صفحة كووورة رقم {page}: "
                 f"{url}"
@@ -1408,6 +1471,7 @@ def _fetch_kooora_direct(
             page_processed = 0
             page_verified = 0
             page_verification_failed = 0
+            page_retry_saved = 0
 
             for item in page_news:
 
@@ -1428,11 +1492,15 @@ def _fetch_kooora_direct(
                     "list_published_dt"
                 )
 
-                if list_dt and not _is_recent(
-                    list_dt,
-                    cycle_start,
-                    PRECHECK_MAX_AGE_HOURS,
+                if (
+                    list_dt
+                    and not _is_recent(
+                        list_dt,
+                        cycle_start,
+                        PRECHECK_MAX_AGE_HOURS,
+                    )
                 ):
+
                     page_old += 1
                     continue
 
@@ -1440,6 +1508,7 @@ def _fetch_kooora_direct(
                     link,
                     title,
                 ):
+
                     page_processed += 1
                     continue
 
@@ -1461,8 +1530,29 @@ def _fetch_kooora_direct(
                     FINAL_MAX_AGE_HOURS,
                 )
 
-                if not verified:
+                if not verified.get(
+                    "success"
+                ):
+
                     page_verification_failed += 1
+
+                    # ---------------------------------------------
+                    # مهم:
+                    # الفشل المؤقت لا يضيع الخبر.
+                    # يتم حفظه ليعاد فحصه خلال 6 ساعات.
+                    # ---------------------------------------------
+
+                    if verified.get(
+                        "retryable"
+                    ):
+
+                        _save_retryable_failure(
+                            link,
+                            title,
+                        )
+
+                        page_retry_saved += 1
+
                     continue
 
                 real_published_dt = verified[
@@ -1497,7 +1587,10 @@ def _fetch_kooora_direct(
                 ):
                     continue
 
-                seen_links.add(link)
+                seen_links.add(
+                    link
+                )
+
                 seen_titles.add(
                     normalized_title
                 )
@@ -1523,16 +1616,196 @@ def _fetch_kooora_direct(
                 f"verified={page_verified}, "
                 f"already_processed={page_processed}, "
                 f"outside_precheck={page_old}, "
-                f"verification_failed={page_verification_failed}"
+                f"verification_failed={page_verification_failed}, "
+                f"retry_saved={page_retry_saved}"
             )
 
         except Exception as e:
+
             print(
                 f"⚠️ تعذر جلب صفحة كووورة رقم "
                 f"{page}: {e}"
             )
 
     return all_news
+
+
+# ============================================================
+# إعادة محاولة الأخبار الفاشلة
+# ============================================================
+
+def _retry_failed_news(
+    cycle_start: datetime,
+) -> list:
+
+    failed_items = db.get_retryable_failed_news(
+        limit=200
+    )
+
+    if not failed_items:
+
+        print(
+            "ℹ️ لا توجد أخبار فاشلة قابلة لإعادة المحاولة."
+        )
+
+        return []
+
+    print(
+        f"\n🔄 توجد {len(failed_items)} "
+        "أخبار فاشلة ضمن نافذة إعادة المحاولة."
+    )
+
+    retry_news = []
+
+    seen_links = set()
+    seen_titles = set()
+
+    for item in failed_items:
+
+        link = item.get(
+            "link",
+            "",
+        )
+
+        title = item.get(
+            "title",
+            "",
+        )
+
+        if not link:
+            continue
+
+        normalized_link = db._normalize_url(
+            link
+        )
+
+        normalized_title = _normalize_title(
+            title
+        )
+
+        if normalized_link in seen_links:
+            continue
+
+        if (
+            normalized_title
+            and normalized_title in seen_titles
+        ):
+            continue
+
+        # -------------------------------------------------
+        # إذا كان العنوان أصبح ممنوعًا، لا نعيده.
+        # -------------------------------------------------
+
+        if _is_filtered_title(
+            title
+        ):
+
+            _record_filtered_title(
+                title=title,
+                link=link,
+                source="Retry",
+            )
+
+            continue
+
+        print(
+            "\n♻️ إعادة محاولة خبر فاشل:"
+        )
+
+        print(
+            f"   📰 {title[:180]}"
+        )
+
+        print(
+            f"   🔗 {link}"
+        )
+
+        verified = _verify_article_page(
+            link,
+            cycle_start,
+            FINAL_MAX_AGE_HOURS,
+        )
+
+        if not verified.get(
+            "success"
+        ):
+
+            if verified.get(
+                "retryable"
+            ):
+
+                print(
+                    "   ⏳ ما زال الفشل مؤقتًا، "
+                    "سيتم الاحتفاظ به لإعادة المحاولة."
+                )
+
+            else:
+
+                print(
+                    "   🚫 لم يعد الخبر صالحًا لإعادة المحاولة."
+                )
+
+            continue
+
+        real_published_dt = verified[
+            "published_dt"
+        ]
+
+        resolved_url = verified[
+            "resolved_url"
+        ]
+
+        # -------------------------------------------------
+        # مهم:
+        # خبر فشل سابقًا لكنه أصبح أقدم من 3 ساعات
+        # لا يتم نشره كخبر جديد.
+        # -------------------------------------------------
+
+        if not _is_recent(
+            real_published_dt,
+            cycle_start,
+            FINAL_MAX_AGE_HOURS,
+        ):
+
+            print(
+                "   ⏭️ انتهت صلاحية الخبر كخبر جديد "
+                "لأنه أصبح خارج نافذة الـ3 ساعات."
+            )
+
+            continue
+
+        seen_links.add(
+            normalized_link
+        )
+
+        if normalized_title:
+            seen_titles.add(
+                normalized_title
+            )
+
+        retry_news.append(
+            {
+                "title": title,
+                "link": link,
+                "published": real_published_dt.isoformat(),
+                "published_dt": real_published_dt,
+                "source": "Kooora Retry",
+                "matched_keyword": "Kooora",
+                "resolved_url": resolved_url,
+            }
+        )
+
+        print(
+            "   ✅ تم استعادة الخبر الفاشل "
+            "وأصبح جاهزًا لإعادة المعالجة."
+        )
+
+    print(
+        f"♻️ الأخبار المستعادة من الفشل: "
+        f"{len(retry_news)}"
+    )
+
+    return retry_news
 
 
 # ============================================================
@@ -1568,6 +1841,7 @@ def _fetch_google_news_fallback(
             continue
 
         try:
+
             raw_data, _ = _fetch_url(
                 source_url
             )
@@ -1607,21 +1881,20 @@ def _fetch_google_news_fallback(
                 if normalized_title in seen_titles:
                     continue
 
-                # -------------------------------------------------
-                # فلترة عنوان الخبر الأصلي فقط.
-                # يتم تنفيذها أيضًا في خطة Google News الاحتياطية.
-                # -------------------------------------------------
-
                 if _is_filtered_title(
                     clean_title
                 ):
+
                     _record_filtered_title(
                         title=clean_title,
                         link=link,
                         source=source_name,
                     )
 
-                    seen_links.add(link)
+                    seen_links.add(
+                        link
+                    )
+
                     continue
 
                 if db.is_processed(
@@ -1643,6 +1916,7 @@ def _fetch_google_news_fallback(
                     continue
 
                 try:
+
                     published_dt = datetime(
                         *published_parsed[:6],
                         tzinfo=timezone.utc,
@@ -1663,6 +1937,7 @@ def _fetch_google_news_fallback(
                         link
                     ).netloc.lower()
                 ):
+
                     print(
                         "\n🔎 التحقق من خبر Google News "
                         "من صفحة كووورة الأصلية:"
@@ -1678,7 +1953,19 @@ def _fetch_google_news_fallback(
                         max_age,
                     )
 
-                    if not verified:
+                    if not verified.get(
+                        "success"
+                    ):
+
+                        if verified.get(
+                            "retryable"
+                        ):
+
+                            _save_retryable_failure(
+                                link,
+                                clean_title,
+                            )
+
                         continue
 
                     published_dt = verified[
@@ -1696,7 +1983,10 @@ def _fetch_google_news_fallback(
                 ):
                     continue
 
-                seen_links.add(link)
+                seen_links.add(
+                    link
+                )
+
                 seen_titles.add(
                     normalized_title
                 )
@@ -1713,6 +2003,7 @@ def _fetch_google_news_fallback(
                 )
 
         except Exception as e:
+
             print(
                 f"⚠️ فشل Google News fallback: {e}"
             )
@@ -1728,10 +2019,6 @@ def fetch_prioritized_news(
     cycle_start: datetime | None = None,
 ) -> list:
 
-    # -------------------------------------------------
-    # بدء تقرير فلترة العناوين لهذه الدورة.
-    # -------------------------------------------------
-
     _reset_title_filter_report()
 
     settings = CONFIG.get(
@@ -1740,11 +2027,13 @@ def fetch_prioritized_news(
     )
 
     if cycle_start is None:
+
         cycle_start = datetime.now(
             timezone.utc
         )
 
     if cycle_start.tzinfo is None:
+
         cycle_start = cycle_start.replace(
             tzinfo=timezone.utc
         )
@@ -1781,8 +2070,13 @@ def fetch_prioritized_news(
     )
 
     print(
-        "⏱️ نافذة النشر النهائية: آخر 3 ساعات "
+        "⏱️ نافذة الأخبار الجديدة: آخر 3 ساعات "
         "من وقت بدء الدورة."
+    )
+
+    print(
+        "🔄 نافذة إعادة محاولة الأخبار الفاشلة: "
+        "6 ساعات من وقت أول فشل."
     )
 
     print(
@@ -1811,9 +2105,21 @@ def fetch_prioritized_news(
     )
 
     print(
-        f"🕐 بداية النافذة النهائية: "
+        f"🕐 بداية نافذة الأخبار الجديدة: "
         f"{cutoff.isoformat()}"
     )
+
+    # =====================================================
+    # أولًا: استعادة الأخبار التي فشلت سابقًا.
+    # =====================================================
+
+    retry_news = _retry_failed_news(
+        cycle_start
+    )
+
+    # =====================================================
+    # ثانيًا: جلب الأخبار الجديدة.
+    # =====================================================
 
     direct_news = _fetch_kooora_direct(
         cycle_start,
@@ -1822,11 +2128,11 @@ def fetch_prioritized_news(
 
     if direct_news:
 
-        all_news = direct_news
+        all_news = retry_news + direct_news
 
         print(
             f"✅ تم العثور على {len(direct_news)} "
-            "خبرًا حقيقيًا وحديثًا من كووورة."
+            "خبرًا جديدًا حقيقيًا وحديثًا من كووورة."
         )
 
     else:
@@ -1841,16 +2147,21 @@ def fetch_prioritized_news(
             "كخطة احتياطية..."
         )
 
-        all_news = _fetch_google_news_fallback(
+        fallback_news = _fetch_google_news_fallback(
             cycle_start,
             FINAL_MAX_AGE_HOURS,
         )
 
-    # -------------------------------------------------
-    # فلترة نهائية إضافية قبل التسليم إلى main.py
-    # -------------------------------------------------
+        all_news = retry_news + fallback_news
+
+    # =====================================================
+    # إزالة التكرار بين الأخبار المستعادة والجديدة.
+    # =====================================================
 
     final_news = []
+
+    seen_links = set()
+    seen_titles = set()
 
     for news in all_news:
 
@@ -1861,12 +2172,50 @@ def fetch_prioritized_news(
         if not published_dt:
             continue
 
+        # جميع الأخبار التي سيتم إرسالها إلى main.py
+        # يجب أن تكون حديثة ضمن نافذة الـ3 ساعات.
         if not _is_recent(
             published_dt,
             cycle_start,
             FINAL_MAX_AGE_HOURS,
         ):
             continue
+
+        link = news.get(
+            "link",
+            "",
+        )
+
+        title = news.get(
+            "title",
+            "",
+        )
+
+        normalized_link = db._normalize_url(
+            link
+        )
+
+        normalized_title = _normalize_title(
+            title
+        )
+
+        if normalized_link in seen_links:
+            continue
+
+        if (
+            normalized_title
+            and normalized_title in seen_titles
+        ):
+            continue
+
+        seen_links.add(
+            normalized_link
+        )
+
+        if normalized_title:
+            seen_titles.add(
+                normalized_title
+            )
 
         final_news.append(
             news
@@ -1877,11 +2226,12 @@ def fetch_prioritized_news(
         reverse=True,
     )
 
-    # -------------------------------------------------
+    # =====================================================
     # تنظيف الحقول الداخلية.
-    # -------------------------------------------------
+    # =====================================================
 
     for news in final_news:
+
         news.pop(
             "published_dt",
             None,
@@ -1913,6 +2263,11 @@ def fetch_prioritized_news(
     print(
         "⏱️ جميع الأخبار المقبولة تم التحقق "
         "من وقت نشرها من صفحة الخبر نفسها."
+    )
+
+    print(
+        "🔄 الأخبار الفاشلة لا تضيع أثناء نافذة "
+        "إعادة المحاولة البالغة 6 ساعات."
     )
 
     return final_news
