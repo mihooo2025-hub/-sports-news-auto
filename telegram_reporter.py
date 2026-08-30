@@ -5,6 +5,7 @@ Sends a summary report to a Telegram group via Bot after each execution cycle:
 - Titles of rewritten and published articles.
 - Links to original source articles and published site articles.
 - Number of articles that failed or were skipped during processing.
+- Number and titles of articles filtered by title.
 
 Requires Telegram Bot Token (from BotFather) and Group ID (chat_id) in config.json
 or provided via environment variables (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).
@@ -14,11 +15,27 @@ import html
 import requests
 from config import CONFIG
 
-TG = CONFIG.get("telegram", {})
-BOT_TOKEN = TG.get("bot_token", "")
-CHAT_ID = TG.get("chat_id", "")
 
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+TG = CONFIG.get(
+    "telegram",
+    {},
+)
+
+BOT_TOKEN = TG.get(
+    "bot_token",
+    "",
+)
+
+CHAT_ID = TG.get(
+    "chat_id",
+    "",
+)
+
+API_URL = (
+    f"https://api.telegram.org/bot"
+    f"{BOT_TOKEN}/sendMessage"
+)
+
 
 # الحد الأقصى الذي تسمح به Telegram للرسالة النصية تقريبًا.
 MAX_MESSAGE_LENGTH = 4096
@@ -33,7 +50,10 @@ def _is_configured() -> bool:
     )
 
 
-def _send_message(text: str) -> bool:
+def _send_message(
+    text: str,
+) -> bool:
+
     try:
         resp = requests.post(
             API_URL,
@@ -47,12 +67,15 @@ def _send_message(text: str) -> bool:
         )
 
         resp.raise_for_status()
+
         return True
 
     except Exception as e:
+
         print(
             f"⚠️ Failed to send Telegram report: {e}"
         )
+
         return False
 
 
@@ -60,6 +83,7 @@ def send_cycle_report(
     published_items: list,
     checked_count: int,
     skipped_count: int,
+    filtered_title_items: list = None,
 ):
     """
     published_items:
@@ -76,39 +100,84 @@ def send_cycle_report(
     skipped_count:
         عدد الأخبار التي فشلت أو تم تجاوزها أثناء الدورة.
 
+    filtered_title_items:
+        الأخبار التي تم استبعادها بسبب عنوانها.
+
     ملاحظة:
         يتم إرسال التقرير كاملًا في رسالة Telegram واحدة،
         ولا يتم تقسيمه إلى عدة رسائل حسب عدد الأخبار.
     """
 
+    if filtered_title_items is None:
+        filtered_title_items = []
+
     if not _is_configured():
+
         print(
             "ℹ️ Telegram credentials not configured "
             "— skipping report dispatch."
         )
+
         return
 
     # =========================================================
-    # بناء التقرير كاملًا في رسالة واحدة
+    # في حالة عدم نشر أي خبر
     # =========================================================
 
-    # في حالة عدم نشر أي خبر.
     if not published_items:
+
         message = (
             f"📊 <b>تقرير دورة الأخبار</b>\n\n"
             f"🔍 تم فحص: {checked_count} خبر\n"
             f"❌ فشل/تجاوز: {skipped_count} خبر\n"
+            f"🚫 استُبعد بسبب العنوان: "
+            f"{len(filtered_title_items)} خبر\n"
             f"✅ تم النشر: 0 خبر\n\n"
             f"لم يُنشر أي خبر جديد في هذه الدورة."
         )
 
-        if len(message) > MAX_MESSAGE_LENGTH:
-            print(
-                "⚠️ تقرير Telegram تجاوز الحد المسموح به."
+        # -----------------------------------------------------
+        # إضافة عناوين الأخبار المستبعدة
+        # -----------------------------------------------------
+
+        if filtered_title_items:
+
+            message += (
+                "\n\n🚫 <b>الأخبار المستبعدة "
+                "بسبب العنوان:</b>\n"
             )
+
+            for i, item in enumerate(
+                filtered_title_items,
+                start=1,
+            ):
+
+                title = item.get(
+                    "title",
+                    "بدون عنوان",
+                )
+
+                title = html.escape(
+                    str(title)
+                )
+
+                message += (
+                    f"{i}. {title}\n"
+                )
+
+        if len(message) > MAX_MESSAGE_LENGTH:
+
+            print(
+                "⚠️ تقرير Telegram تجاوز "
+                "الحد المسموح به."
+            )
+
             return
 
-        _send_message(message)
+        _send_message(
+            message
+        )
+
         return
 
     # =========================================================
@@ -120,18 +189,21 @@ def send_cycle_report(
         f"✅ نُشر: {len(published_items)} | "
         f"🔍 فُحص: {checked_count} | "
         f"❌ فشل/تجاوز: {skipped_count}\n"
+        f"🚫 استُبعد بسبب العنوان: "
+        f"{len(filtered_title_items)}\n"
     )
 
     lines = []
 
     # =========================================================
-    # إضافة جميع الأخبار إلى نفس الرسالة
+    # إضافة جميع الأخبار المنشورة
     # =========================================================
 
     for i, item in enumerate(
         published_items,
         start=1,
     ):
+
         title = item.get(
             "title",
             "بدون عنوان",
@@ -152,22 +224,34 @@ def send_cycle_report(
             str(title)
         )
 
-        if source_url and source_url != "غير متوفر":
+        if (
+            source_url
+            and source_url != "غير متوفر"
+        ):
+
             source_link = (
                 f'<a href="'
                 f'{html.escape(str(source_url), quote=True)}'
                 f'">رابط الخبر الأصلي</a>'
             )
+
         else:
+
             source_link = "غير متوفر"
 
-        if site_url and site_url != "غير متوفر":
+        if (
+            site_url
+            and site_url != "غير متوفر"
+        ):
+
             site_link = (
                 f'<a href="'
                 f'{html.escape(str(site_url), quote=True)}'
                 f'">رابط الخبر الجديد</a>'
             )
+
         else:
+
             site_link = "غير متوفر"
 
         lines.append(
@@ -177,13 +261,46 @@ def send_cycle_report(
         )
 
     # =========================================================
+    # إضافة الأخبار المستبعدة بسبب العنوان
+    # =========================================================
+
+    if filtered_title_items:
+
+        lines.append(
+            "\n\n🚫 <b>الأخبار المستبعدة "
+            "بسبب العنوان:</b>"
+        )
+
+        for i, item in enumerate(
+            filtered_title_items,
+            start=1,
+        ):
+
+            title = item.get(
+                "title",
+                "بدون عنوان",
+            )
+
+            title = html.escape(
+                str(title)
+            )
+
+            lines.append(
+                f"\n🚫 {i}. {title}"
+            )
+
+    # =========================================================
     # رسالة واحدة فقط
     # =========================================================
 
-    message = header + "".join(lines)
+    message = (
+        header
+        + "".join(lines)
+    )
 
     # Telegram يسمح بحد أقصى يقارب 4096 حرفًا.
     if len(message) > MAX_MESSAGE_LENGTH:
+
         print(
             "⚠️ تقرير Telegram تجاوز الحد الأقصى "
             "لرسالة واحدة (4096 حرف تقريبًا)."
@@ -199,16 +316,22 @@ def send_cycle_report(
 
         return
 
-    _send_message(message)
+    _send_message(
+        message
+    )
 
 
-def send_error_alert(message: str):
-    """Sends an immediate error notification upon critical failure."""
+def send_error_alert(
+    message: str,
+):
+    """
+    إرسال تنبيه فوري عند حدوث خطأ حرج.
+    """
 
     if not _is_configured():
         return
 
     _send_message(
         f"⛔ <b>تنبيه خطأ — نظام الأخبار</b>\n\n"
-        f"{message}"
+        f"{html.escape(str(message))}"
     )
