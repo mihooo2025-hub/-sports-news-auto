@@ -20,7 +20,10 @@ from datetime import datetime, timezone
 
 import db
 from config import CONFIG
-from rss_fetcher import fetch_prioritized_news
+from rss_fetcher import (
+    fetch_prioritized_news,
+    get_filtered_title_items,
+)
 from article_extractor import extract_article
 from content_ai import (
     process_article,
@@ -114,6 +117,14 @@ def run_pipeline():
         cycle_start=cycle_start
     )
 
+    # ======================================================
+    # الأخبار التي تم استبعادها بسبب عنوانها
+    # ======================================================
+
+    filtered_title_items = (
+        get_filtered_title_items()
+    )
+
     checked_count = len(
         news_items
     )
@@ -128,6 +139,7 @@ def run_pipeline():
             [],
             0,
             0,
+            filtered_title_items,
         )
 
         return
@@ -512,6 +524,11 @@ def run_pipeline():
     )
 
     print(
+        f"🚫 استُبعد بسبب العنوان: "
+        f"{len(filtered_title_items)}"
+    )
+
+    print(
         f"🔍 الأخبار المقبولة ضمن نافذة 3 ساعات: "
         f"{checked_count}"
     )
@@ -531,6 +548,7 @@ def run_pipeline():
         published_items,
         checked_count,
         skipped_count,
+        filtered_title_items,
     )
 
     print(
