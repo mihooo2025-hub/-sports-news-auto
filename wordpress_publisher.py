@@ -13,9 +13,17 @@ import requests
 from requests.auth import HTTPBasicAuth
 from config import CONFIG
 
-# ترويسات بسيطة ومناسبة لـ WordPress REST API
+
+# =========================================================
+# ترويسات WordPress REST API
+# =========================================================
+
 DEFAULT_HEADERS = {
-    "User-Agent": "news-bot/1.0",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/json, text/plain, */*",
 }
 
@@ -28,20 +36,26 @@ HEADERS_JSON["Content-Type"] = "application/json"
 HEADERS_WP = HEADERS_JSON
 
 HEADERS_IMAGE = {
-    "User-Agent": "news-bot/1.0",
-    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "image/avif,image/webp,image/apng,image/svg+xml,"
+        "image/*,*/*;q=0.8"
+    ),
 }
 
 _category_cache = {}
 
 
 # =========================================================
-# معالجة أخطاء WordPress المؤقتة
+# إعدادات إعادة محاولة WordPress
 # =========================================================
 
-WP_MAX_RETRIES = 3
+WP_MAX_RETRIES = 4
 
-# الأخطاء التي يمكن أن تكون مؤقتة بسبب Cloudflare / WAF / السيرفر
 RETRY_STATUS_CODES = {
     403,
     429,
@@ -51,8 +65,16 @@ RETRY_STATUS_CODES = {
     504,
 }
 
-RETRY_DELAYS = [3, 7, 12]
+RETRY_DELAYS = [
+    3,
+    6,
+    10,
+]
 
+
+# =========================================================
+# طلبات WordPress مع إعادة المحاولة
+# =========================================================
 
 def _wp_request(
     method: str,
@@ -66,13 +88,14 @@ def _wp_request(
     """
     تنفيذ طلب إلى WordPress REST API مع إعادة المحاولة
     عند الأخطاء المؤقتة أو مشاكل الاتصال.
-
-    لا تتم إعادة المحاولة عند أخطاء المصادقة الدائمة مثل 401.
     """
 
     last_exception = None
 
-    for attempt in range(1, WP_MAX_RETRIES + 1):
+    for attempt in range(
+        1,
+        WP_MAX_RETRIES + 1,
+    ):
 
         try:
             resp = requests.request(
@@ -84,25 +107,45 @@ def _wp_request(
                 **kwargs,
             )
 
-            # نجاح الطلب
+            # -------------------------------------------------
+            # نجاح
+            # -------------------------------------------------
+
             if resp.ok:
                 return resp
 
-            # خطأ يمكن أن يكون مؤقتًا
+            # -------------------------------------------------
+            # أخطاء مؤقتة يمكن إعادة المحاولة عليها
+            # -------------------------------------------------
+
             if resp.status_code in RETRY_STATUS_CODES:
 
                 if attempt < WP_MAX_RETRIES:
-                    delay = RETRY_DELAYS[attempt - 1]
 
-                    retry_after = resp.headers.get("Retry-After")
+                    delay = RETRY_DELAYS[
+                        min(
+                            attempt - 1,
+                            len(RETRY_DELAYS) - 1,
+                        )
+                    ]
+
+                    retry_after = resp.headers.get(
+                        "Retry-After"
+                    )
 
                     if retry_after:
                         try:
                             delay = max(
                                 delay,
-                                min(int(retry_after), 30)
+                                min(
+                                    int(retry_after),
+                                    30,
+                                ),
                             )
-                        except (ValueError, TypeError):
+                        except (
+                            ValueError,
+                            TypeError,
+                        ):
                             pass
 
                     print(
@@ -112,13 +155,18 @@ def _wp_request(
                     )
 
                     print(
-                        f"🔄 إعادة المحاولة بعد {delay} ثوانٍ..."
+                        f"🔄 إعادة المحاولة بعد "
+                        f"{delay} ثوانٍ..."
                     )
 
                     time.sleep(delay)
+
                     continue
 
-            # أخطاء غير قابلة لإعادة المحاولة
+            # -------------------------------------------------
+            # خطأ غير مؤقت
+            # -------------------------------------------------
+
             return resp
 
         except (
@@ -130,7 +178,13 @@ def _wp_request(
             last_exception = e
 
             if attempt < WP_MAX_RETRIES:
-                delay = RETRY_DELAYS[attempt - 1]
+
+                delay = RETRY_DELAYS[
+                    min(
+                        attempt - 1,
+                        len(RETRY_DELAYS) - 1,
+                    )
+                ]
 
                 print(
                     f"⚠️ تعذر الاتصال بـ WordPress "
@@ -138,10 +192,12 @@ def _wp_request(
                 )
 
                 print(
-                    f"🔄 إعادة المحاولة بعد {delay} ثوانٍ..."
+                    f"🔄 إعادة المحاولة بعد "
+                    f"{delay} ثوانٍ..."
                 )
 
                 time.sleep(delay)
+
                 continue
 
             break
@@ -152,35 +208,87 @@ def _wp_request(
     return None
 
 
+# =========================================================
+# بيانات WordPress
+# =========================================================
+
 def _get_wp_credentials():
-    wp = CONFIG.get("wordpress", {})
-    site_url = wp.get("site_url", "").rstrip("/")
-    username = wp.get("username", "")
-    password = wp.get("app_password", "")
 
-    auth = HTTPBasicAuth(username, password)
+    wp = CONFIG.get(
+        "wordpress",
+        {},
+    )
 
-    return site_url, auth, username
+    site_url = wp.get(
+        "site_url",
+        "",
+    ).rstrip("/")
+
+    username = wp.get(
+        "username",
+        "",
+    )
+
+    password = wp.get(
+        "app_password",
+        "",
+    )
+
+    auth = HTTPBasicAuth(
+        username,
+        password,
+    )
+
+    return (
+        site_url,
+        auth,
+        username,
+    )
 
 
-def _print_wp_error(resp, action="WordPress"):
-    print(f"❌ {action} failed — HTTP {resp.status_code}")
+# =========================================================
+# طباعة أخطاء WordPress
+# =========================================================
 
-    # عرض معلومات مفيدة لمعرفة هل الرد جاء من Cloudflare/WAF
-    server = resp.headers.get("Server")
-    cf_ray = resp.headers.get("CF-Ray")
-    cf_mitigated = resp.headers.get("CF-Mitigated")
+def _print_wp_error(
+    resp,
+    action="WordPress",
+):
+
+    print(
+        f"❌ {action} failed — HTTP "
+        f"{resp.status_code}"
+    )
+
+    server = resp.headers.get(
+        "Server"
+    )
+
+    cf_ray = resp.headers.get(
+        "CF-Ray"
+    )
+
+    cf_mitigated = resp.headers.get(
+        "CF-Mitigated"
+    )
 
     if server:
-        print(f"ℹ️ Server: {server}")
+        print(
+            f"ℹ️ Server: {server}"
+        )
 
     if cf_ray:
-        print(f"ℹ️ CF-Ray: {cf_ray}")
+        print(
+            f"ℹ️ CF-Ray: {cf_ray}"
+        )
 
     if cf_mitigated:
-        print(f"ℹ️ CF-Mitigated: {cf_mitigated}")
+        print(
+            f"ℹ️ CF-Mitigated: {cf_mitigated}"
+        )
 
     if resp.status_code == 403:
+
         if (
             "Bot Verification" in resp.text
             or "Cloudflare" in resp.text
@@ -188,47 +296,69 @@ def _print_wp_error(resp, action="WordPress"):
             or cf_ray
             or cf_mitigated
         ):
+
             print(
-                "🚫 تم رفض طلب WordPress REST API بواسطة طبقة حماية "
-                "أمام الموقع (مثل Cloudflare/WAF)."
+                "🚫 تم رفض طلب WordPress REST API "
+                "بواسطة طبقة حماية أمام الموقع "
+                "(مثل Cloudflare/WAF)."
             )
+
             print(
-                "⚠️ هذا يعني غالبًا أن الطلب من GitHub Actions يصل إلى "
-                "خادم الحماية قبل أن يصل إلى WordPress."
+                "⚠️ قد يكون الرفض مؤقتًا."
             )
+
             print(
-                "➡️ تمت إعادة المحاولة تلقائيًا قبل اعتبار الطلب فاشلًا."
+                "➡️ تم تنفيذ إعادة المحاولة تلقائيًا."
             )
-            print(
-                "➡️ إذا استمر 403 بعد جميع المحاولات، راجع إعدادات "
-                "حماية الموقع للسماح بطلبات REST API الشرعية."
-            )
+
         else:
+
             print(
                 "⚠️ WordPress returned 403 Forbidden. "
-                "قد تكون المشكلة صلاحيات المستخدم أو إضافة أمنية."
+                "قد تكون المشكلة صلاحيات المستخدم "
+                "أو إضافة أمنية."
             )
 
-        print(f"Response: {resp.text[:500]}")
+        print(
+            f"Response: {resp.text[:500]}"
+        )
 
     else:
-        print(f"Response: {resp.text[:500]}")
 
+        print(
+            f"Response: {resp.text[:500]}"
+        )
+
+
+# =========================================================
+# اختبار المصادقة
+# =========================================================
 
 def test_authentication() -> bool:
     """
-    Validates WordPress credentials before processing to avoid wasting API quota.
-    كما يتحقق أولًا من إمكانية الوصول إلى REST API نفسه.
+    التحقق من إمكانية استخدام WordPress REST API.
+
+    ملاحظة مهمة:
+    أخطاء 403/429/5xx ومشاكل الاتصال المؤقتة
+    لا تؤدي مباشرة إلى إيقاف الدورة.
+
+    يتم إيقاف الدورة عند 401 فقط عندما تكون
+    المصادقة نفسها مرفوضة بشكل واضح.
     """
 
-    site_url, auth, username = _get_wp_credentials()
+    site_url, auth, username = (
+        _get_wp_credentials()
+    )
 
     headers = HEADERS_GET.copy()
 
+    # =====================================================
+    # 1) اختبار REST API الأساسي
+    # =====================================================
+
+    api_check = None
+
     try:
-        # ---------------------------------------------------------
-        # 1) اختبار REST API بدون مصادقة
-        # ---------------------------------------------------------
 
         api_check = _wp_request(
             "GET",
@@ -237,37 +367,60 @@ def test_authentication() -> bool:
             timeout=15,
         )
 
-        if api_check is not None and api_check.status_code == 200:
-            print("✅ WordPress REST API متاح.")
+    except Exception as e:
 
-        elif (
-            api_check is not None
-            and api_check.status_code == 403
-        ):
-            print(
-                "⚠️ REST API الأساسي أعاد HTTP 403 بعد "
-                "إعادة المحاولة."
-            )
+        print(
+            f"⚠️ تعذر فحص REST API الأساسي: {e}"
+        )
 
-            _print_wp_error(
-                api_check,
-                "WordPress REST API check"
-            )
+        print(
+            "ℹ️ سيتم الانتقال مباشرة إلى اختبار المصادقة."
+        )
 
-            print(
-                "🔄 لن يتم إيقاف الدورة الآن، "
-                "وسيتم اختبار المصادقة مباشرة."
-            )
+    if (
+        api_check is not None
+        and api_check.status_code == 200
+    ):
 
-        elif api_check is not None:
-            print(
-                f"⚠️ فحص REST API أعاد HTTP "
-                f"{api_check.status_code}."
-            )
+        print(
+            "✅ WordPress REST API متاح."
+        )
 
-        # ---------------------------------------------------------
-        # 2) اختبار المصادقة
-        # ---------------------------------------------------------
+    elif (
+        api_check is not None
+        and api_check.status_code == 403
+    ):
+
+        print(
+            "⚠️ REST API الأساسي أعاد HTTP 403 "
+            "بعد إعادة المحاولة."
+        )
+
+        _print_wp_error(
+            api_check,
+            "WordPress REST API check",
+        )
+
+        print(
+            "ℹ️ لن يتم إيقاف الدورة بسبب هذا الفحص."
+        )
+
+    elif api_check is not None:
+
+        print(
+            f"⚠️ فحص REST API أعاد HTTP "
+            f"{api_check.status_code}."
+        )
+
+        print(
+            "ℹ️ سيتم الاعتماد على اختبار المصادقة."
+        )
+
+    # =====================================================
+    # 2) الاختبار الحقيقي للمصادقة
+    # =====================================================
+
+    try:
 
         resp = _wp_request(
             "GET",
@@ -277,67 +430,182 @@ def test_authentication() -> bool:
             timeout=15,
         )
 
-        if resp is not None and resp.status_code == 200:
+    except Exception as e:
+
+        print(
+            f"⚠️ تعذر الوصول إلى اختبار المصادقة: {e}"
+        )
+
+        print(
+            "⚠️ قد يكون الخطأ مؤقتًا أو متعلقًا "
+            "بطبقة الحماية."
+        )
+
+        print(
+            "ℹ️ سيتم السماح للدورة بالاستمرار، "
+            "وستتم إعادة المحاولة عند عمليات WordPress الفعلية."
+        )
+
+        return True
+
+    # =====================================================
+    # المصادقة نجحت
+    # =====================================================
+
+    if (
+        resp is not None
+        and resp.status_code == 200
+    ):
+
+        try:
             user_data = resp.json()
 
-            print(
-                f"✅ WordPress authentication successful — User: "
-                f"{user_data.get('name', username)}"
-            )
+        except Exception:
+            user_data = {}
 
-            return True
+        print(
+            f"✅ WordPress authentication successful — "
+            f"User: {user_data.get('name', username)}"
+        )
 
-        if resp is not None:
-            _print_wp_error(
-                resp,
-                "WordPress authentication"
-            )
+        return True
 
-            if resp.status_code == 401:
-                print(
-                    "Possible reasons:\n"
-                    "  1) Application Password expired/invalid — generate a new one.\n"
-                    "  2) Typo in credentials.\n"
-                    "  3) Username mismatch.\n"
-                    "  4) Server/Hosting stripping Authorization header."
-                )
+    # =====================================================
+    # 401 = مشكلة حقيقية في بيانات الدخول
+    # =====================================================
 
-            elif resp.status_code == 403:
-                print(
-                    "Possible reasons:\n"
-                    "  1) Cloudflare/WAF/hosting security blocked the request.\n"
-                    "  2) Security plugin blocked REST API authentication.\n"
-                    "  3) The WordPress user lacks the required permissions.\n"
-                    "  4) Authorization header is being removed by the server/proxy."
-                )
+    if (
+        resp is not None
+        and resp.status_code == 401
+    ):
+
+        _print_wp_error(
+            resp,
+            "WordPress authentication",
+        )
+
+        print(
+            "❌ المصادقة مرفوضة بشكل واضح."
+        )
+
+        print(
+            "Possible reasons:\n"
+            "  1) Application Password expired/invalid — generate a new one.\n"
+            "  2) Typo in credentials.\n"
+            "  3) Username mismatch.\n"
+            "  4) Server/Hosting stripping Authorization header."
+        )
 
         return False
 
-    except Exception as e:
-        print(f"❌ Connection to WordPress failed: {e}")
-        return False
+    # =====================================================
+    # 403 = لا نوقف الدورة بسبب احتمال الحماية
+    # =====================================================
+
+    if (
+        resp is not None
+        and resp.status_code == 403
+    ):
+
+        _print_wp_error(
+            resp,
+            "WordPress authentication",
+        )
+
+        print(
+            "⚠️ تعذر اختبار المصادقة بسبب HTTP 403."
+        )
+
+        print(
+            "ℹ️ لن يتم اعتبار هذا فشلًا نهائيًا."
+        )
+
+        print(
+            "🔄 ستتم محاولة عمليات WordPress الفعلية "
+            "مع إعادة المحاولة تلقائيًا."
+        )
+
+        return True
+
+    # =====================================================
+    # 429 / 5xx
+    # =====================================================
+
+    if (
+        resp is not None
+        and resp.status_code in {
+            429,
+            500,
+            502,
+            503,
+            504,
+        }
+    ):
+
+        _print_wp_error(
+            resp,
+            "WordPress authentication",
+        )
+
+        print(
+            "⚠️ WordPress غير متاح مؤقتًا."
+        )
+
+        print(
+            "ℹ️ لن يتم إيقاف الدورة "
+            "بسبب هذا الفحص المسبق."
+        )
+
+        return True
+
+    # =====================================================
+    # أي نتيجة أخرى
+    # =====================================================
+
+    if resp is not None:
+
+        _print_wp_error(
+            resp,
+            "WordPress authentication",
+        )
+
+    print(
+        "⚠️ تعذر تأكيد المصادقة مسبقًا، "
+        "لكن لن يتم إيقاف الدورة."
+    )
+
+    print(
+        "ℹ️ سيتم الاعتماد على عمليات WordPress الفعلية."
+    )
+
+    return True
 
 
-def _get_category_id(name: str) -> int | None:
-    """
-    Looks up an existing category ID by name.
-    Does not create new categories — returns None if not found.
-    """
+# =========================================================
+# البحث عن التصنيف
+# =========================================================
+
+def _get_category_id(
+    name: str,
+) -> int | None:
 
     if name in _category_cache:
         return _category_cache[name]
 
-    site_url, auth, _ = _get_wp_credentials()
+    site_url, auth, _ = (
+        _get_wp_credentials()
+    )
 
     headers = HEADERS_GET.copy()
 
     try:
+
         resp = _wp_request(
             "GET",
             f"{site_url}/wp-json/wp/v2/categories",
             params={
                 "search": name,
-                "per_page": 5
+                "per_page": 5,
             },
             auth=auth,
             headers=headers,
@@ -348,15 +616,25 @@ def _get_category_id(name: str) -> int | None:
             return None
 
         if not resp.ok:
+
             _print_wp_error(
                 resp,
-                f"Category search '{name}'"
+                f"Category search '{name}'",
             )
+
             return None
 
         for cat in resp.json():
-            if cat["name"].strip() == name.strip():
-                _category_cache[name] = cat["id"]
+
+            if (
+                cat["name"].strip()
+                == name.strip()
+            ):
+
+                _category_cache[name] = (
+                    cat["id"]
+                )
+
                 return cat["id"]
 
         print(
@@ -367,23 +645,36 @@ def _get_category_id(name: str) -> int | None:
         return None
 
     except Exception as e:
+
         print(
-            f"⚠️ Category search failed for '{name}': {e}"
+            f"⚠️ Category search failed for "
+            f"'{name}': {e}"
         )
 
     return None
 
 
-def resolve_category_ids(category_names: list) -> list:
+# =========================================================
+# تحويل أسماء التصنيفات إلى IDs
+# =========================================================
+
+def resolve_category_ids(
+    category_names: list,
+) -> list:
+
     # Uncategorized يجب أن يكون موجودًا دائمًا،
     # مع الاحتفاظ بباقي التصنيفات التي يحددها النظام.
 
-    category_names = category_names or []
+    category_names = (
+        category_names or []
+    )
 
     if not any(
-        str(name).strip().lower() == "uncategorized"
+        str(name).strip().lower()
+        == "uncategorized"
         for name in category_names
     ):
+
         category_names = [
             "Uncategorized"
         ] + list(category_names)
@@ -391,26 +682,37 @@ def resolve_category_ids(category_names: list) -> list:
     ids = []
 
     for name in category_names:
-        cat_id = _get_category_id(name)
+
+        cat_id = _get_category_id(
+            name
+        )
 
         if cat_id:
-            ids.append(cat_id)
+            ids.append(
+                cat_id
+            )
 
     return ids
 
 
+# =========================================================
+# رفع الصورة المميزة
+# =========================================================
+
 def upload_featured_image(
     image_url: str,
-    alt_text: str = ""
+    alt_text: str = "",
 ) -> int | None:
 
     if not image_url:
         return None
 
-    site_url, auth, _ = _get_wp_credentials()
+    site_url, auth, _ = (
+        _get_wp_credentials()
+    )
 
     try:
-        # تحميل الصورة من المصدر الخارجي
+
         img_resp = requests.get(
             image_url,
             headers=HEADERS_IMAGE,
@@ -421,14 +723,16 @@ def upload_featured_image(
 
         content_type = img_resp.headers.get(
             "Content-Type",
-            "image/jpeg"
+            "image/jpeg",
         )
 
         if "image" not in content_type:
+
             print(
                 f"⚠️ URL does not contain valid image data "
                 f"(Content-Type: {content_type})"
             )
+
             return None
 
         ext = "jpg"
@@ -440,19 +744,22 @@ def upload_featured_image(
             ext = "webp"
 
         filename = (
-            f"featured-{abs(hash(image_url)) % 10**8}.{ext}"
+            f"featured-"
+            f"{abs(hash(image_url)) % 10**8}"
+            f".{ext}"
         )
 
-        upload_headers = DEFAULT_HEADERS.copy()
+        upload_headers = (
+            DEFAULT_HEADERS.copy()
+        )
 
         upload_headers.update({
-            "Content-Disposition": (
-                f'attachment; filename="{filename}"'
-            ),
-            "Content-Type": content_type,
+            "Content-Disposition":
+                f'attachment; filename="{filename}"',
+            "Content-Type":
+                content_type,
         })
 
-        # رفع الصورة إلى WordPress مع إعادة المحاولة
         upload_resp = _wp_request(
             "POST",
             f"{site_url}/wp-json/wp/v2/media",
@@ -462,20 +769,29 @@ def upload_featured_image(
             timeout=20,
         )
 
-        if upload_resp is None or not upload_resp.ok:
+        if (
+            upload_resp is None
+            or not upload_resp.ok
+        ):
+
             if upload_resp is not None:
+
                 _print_wp_error(
                     upload_resp,
-                    "Featured image upload"
+                    "Featured image upload",
                 )
 
             return None
 
         media_data = upload_resp.json()
+
         media_id = media_data["id"]
 
         if alt_text:
-            alt_headers = HEADERS_JSON.copy()
+
+            alt_headers = (
+                HEADERS_JSON.copy()
+            )
 
             alt_resp = _wp_request(
                 "POST",
@@ -488,15 +804,20 @@ def upload_featured_image(
                 timeout=10,
             )
 
-            if alt_resp is not None and not alt_resp.ok:
+            if (
+                alt_resp is not None
+                and not alt_resp.ok
+            ):
+
                 _print_wp_error(
                     alt_resp,
-                    "Featured image alt text update"
+                    "Featured image alt text update",
                 )
 
         return media_id
 
     except Exception as e:
+
         print(
             f"⚠️ Featured image upload failed: {e}"
         )
@@ -504,39 +825,54 @@ def upload_featured_image(
         return None
 
 
+# =========================================================
+# إنشاء المقال
+# =========================================================
+
 def create_draft_post(
     ai_result: dict,
     source_url: str,
-    image_url: str
+    image_url: str,
 ) -> dict | None:
 
     main_title = ai_result["title"]
 
-    site_url, auth, _ = _get_wp_credentials()
+    site_url, auth, _ = (
+        _get_wp_credentials()
+    )
 
     media_id = upload_featured_image(
         image_url,
-        alt_text=main_title
+        alt_text=main_title,
     )
 
-    category_ids = resolve_category_ids(
-        ai_result.get("categories", [])
+    category_ids = (
+        resolve_category_ids(
+            ai_result.get(
+                "categories",
+                [],
+            )
+        )
     )
 
     post_payload = {
         "title": main_title,
-        "content": ai_result["rewritten_content"],
+        "content": ai_result[
+            "rewritten_content"
+        ],
         "status": "publish",
         "categories": category_ids,
     }
 
     if media_id:
-        post_payload["featured_media"] = media_id
+        post_payload[
+            "featured_media"
+        ] = media_id
 
     headers = HEADERS_JSON.copy()
 
     try:
-        # إنشاء المقال مع إعادة المحاولة عند أخطاء WordPress المؤقتة
+
         resp = _wp_request(
             "POST",
             f"{site_url}/wp-json/wp/v2/posts",
@@ -546,11 +882,16 @@ def create_draft_post(
             timeout=15,
         )
 
-        if resp is None or not resp.ok:
+        if (
+            resp is None
+            or not resp.ok
+        ):
+
             if resp is not None:
+
                 _print_wp_error(
                     resp,
-                    "Create WordPress post"
+                    "Create WordPress post",
                 )
 
             return None
@@ -565,11 +906,16 @@ def create_draft_post(
         return post_data
 
     except Exception as e:
+
         print(
             f"❌ Failed to create WordPress post: {e}"
         )
 
-        if hasattr(e, "response") and e.response is not None:
+        if (
+            hasattr(e, "response")
+            and e.response is not None
+        ):
+
             print(
                 f"Error details: "
                 f"{e.response.text[:500]}"
@@ -578,30 +924,39 @@ def create_draft_post(
         return None
 
 
+# =========================================================
+# الدالة التي يستدعيها main.py
+# =========================================================
+
 def publish_post(
     title: str,
     content: str,
     categories: list = None,
-    image_url: str = None
+    image_url: str = None,
 ) -> str | None:
+
     """
     الدالة التي يتم استدعاؤها من main.py لنشر المقال
     وإرجاع رابط المنشور عند النجاح.
     """
 
-    site_url, auth, _ = _get_wp_credentials()
+    site_url, auth, _ = (
+        _get_wp_credentials()
+    )
 
     media_id = (
         upload_featured_image(
             image_url,
-            alt_text=title
+            alt_text=title,
         )
         if image_url
         else None
     )
 
-    category_ids = resolve_category_ids(
-        categories
+    category_ids = (
+        resolve_category_ids(
+            categories
+        )
     )
 
     post_payload = {
@@ -612,12 +967,15 @@ def publish_post(
     }
 
     if media_id:
-        post_payload["featured_media"] = media_id
+
+        post_payload[
+            "featured_media"
+        ] = media_id
 
     headers = HEADERS_JSON.copy()
 
     try:
-        # نشر المقال مع إعادة المحاولة عند الأخطاء المؤقتة
+
         resp = _wp_request(
             "POST",
             f"{site_url}/wp-json/wp/v2/posts",
@@ -627,17 +985,25 @@ def publish_post(
             timeout=15,
         )
 
-        if resp is None or not resp.ok:
+        if (
+            resp is None
+            or not resp.ok
+        ):
+
             if resp is not None:
+
                 _print_wp_error(
                     resp,
-                    "Create WordPress post"
+                    "Create WordPress post",
                 )
 
             return None
 
         post_data = resp.json()
-        post_link = post_data.get("link")
+
+        post_link = post_data.get(
+            "link"
+        )
 
         print(
             f"✅ Article published successfully: "
@@ -647,11 +1013,16 @@ def publish_post(
         return post_link
 
     except Exception as e:
+
         print(
             f"❌ Failed to create WordPress post: {e}"
         )
 
-        if hasattr(e, "response") and e.response is not None:
+        if (
+            hasattr(e, "response")
+            and e.response is not None
+        ):
+
             print(
                 f"Error details: "
                 f"{e.response.text[:500]}"
