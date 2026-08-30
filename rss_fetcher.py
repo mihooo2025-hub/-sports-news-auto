@@ -6,13 +6,16 @@ rss_fetcher.py
 آلية التحقق:
 1. اكتشاف روابط المقالات من صفحات كووورة.
 2. استبعاد صفحات المباريات والفرق واللاعبين والفيديو والبث وغيرها.
-3. استخدام وقت القائمة كفلتر أولي واسع فقط.
-4. فتح صفحة الخبر نفسها للمرشحين.
-5. استخراج وقت النشر الحقيقي من صفحة المقال.
-6. اعتماد نافذة آخر 3 ساعات بناءً على وقت النشر الحقيقي.
-7. رفض أي صفحة لا يمكن التأكد أنها مقال إخباري أو لا يمكن تحديد
+3. استبعاد الأخبار التي يحتوي عنوانها الأصلي على:
+   - القنوات الناقلة
+   - القناة الناقلة
+4. استخدام وقت القائمة كفلتر أولي واسع فقط.
+5. فتح صفحة الخبر نفسها للمرشحين.
+6. استخراج وقت النشر الحقيقي من صفحة المقال.
+7. اعتماد نافذة آخر 3 ساعات بناءً على وقت النشر الحقيقي.
+8. رفض أي صفحة لا يمكن التأكد أنها مقال إخباري أو لا يمكن تحديد
    وقت نشرها الحقيقي.
-8. منع التكرار عبر الرابط والعنوان في قاعدة البيانات.
+9. منع التكرار عبر الرابط والعنوان في قاعدة البيانات.
 """
 
 import html
@@ -48,6 +51,132 @@ FINAL_MAX_AGE_HOURS = 3
 # نستخدم نافذة أوسع فقط لاختيار المرشحين من صفحة القائمة.
 # لا تعني أن الخبر مقبول ضمن آخر 9 ساعات.
 PRECHECK_MAX_AGE_HOURS = 9
+
+
+# ============================================================
+# فلترة عناوين الأخبار
+# ============================================================
+
+TITLE_FILTER_PHRASES = (
+    "القنوات الناقلة",
+    "القناة الناقلة",
+)
+
+# يتم تخزين الأخبار التي تم استبعادها في هذه الدورة
+# حتى يتم إرسالها إلى تقرير Telegram.
+_FILTERED_TITLE_ITEMS = []
+
+# منع احتساب الخبر المستبعد أكثر من مرة إذا ظهر
+# في أكثر من صفحة أو أكثر من مصدر.
+_FILTERED_TITLE_KEYS = set()
+
+
+def _reset_title_filter_report():
+    """
+    تصفير قائمة الأخبار المستبعدة عند بداية كل دورة جلب.
+    """
+    global _FILTERED_TITLE_ITEMS
+    global _FILTERED_TITLE_KEYS
+
+    _FILTERED_TITLE_ITEMS = []
+    _FILTERED_TITLE_KEYS = set()
+
+
+def _normalize_filter_title(title: str) -> str:
+    """
+    توحيد المسافات فقط قبل فحص عبارات الفلترة.
+    """
+    if not title:
+        return ""
+
+    title = html.unescape(
+        str(title)
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        title,
+    ).strip()
+
+
+def _is_filtered_title(title: str) -> bool:
+    """
+    التحقق من عنوان الخبر الأصلي فقط.
+
+    لا يتم البحث داخل محتوى المقال.
+    """
+    normalized_title = _normalize_filter_title(
+        title
+    )
+
+    return any(
+        phrase in normalized_title
+        for phrase in TITLE_FILTER_PHRASES
+    )
+
+
+def _record_filtered_title(
+    title: str,
+    link: str = "",
+    source: str = "Kooora",
+):
+    """
+    تسجيل خبر تم استبعاده بسبب عنوانه.
+    """
+    global _FILTERED_TITLE_ITEMS
+    global _FILTERED_TITLE_KEYS
+
+    title = _normalize_filter_title(
+        title
+    )
+
+    link = str(
+        link or ""
+    ).strip()
+
+    key = link or title.lower()
+
+    if not key:
+        return
+
+    if key in _FILTERED_TITLE_KEYS:
+        return
+
+    _FILTERED_TITLE_KEYS.add(
+        key
+    )
+
+    _FILTERED_TITLE_ITEMS.append(
+        {
+            "title": title,
+            "link": link,
+            "source": source,
+        }
+    )
+
+    print(
+        "\n🚫 استبعاد خبر بسبب عنوانه:"
+    )
+
+    print(
+        f"   📰 {title[:180]}"
+    )
+
+    if link:
+        print(
+            f"   🔗 {link}"
+        )
+
+
+def get_filtered_title_items() -> list:
+    """
+    إرجاع الأخبار التي تم استبعادها بسبب عنوانها
+    خلال دورة الجلب الحالية.
+    """
+    return list(
+        _FILTERED_TITLE_ITEMS
+    )
 
 
 # ============================================================
@@ -291,13 +420,11 @@ def _parse_visible_datetime(text: str):
     )
 
     patterns = [
-        # HH:MM DD MONTH YYYY
         rf"(\d{{1,2}}):(\d{{2}})\s*"
         rf"(\d{{1,2}})\s*"
         rf"{month_pattern}\s*"
         rf"(\d{{4}})",
 
-        # DD MONTH YYYY HH:MM
         rf"(\d{{1,2}})\s*"
         rf"{month_pattern}\s*"
         rf"(\d{{4}})\s*"
@@ -453,7 +580,6 @@ def _extract_entry_time(anchor):
     if anchor is None:
         return None
 
-    # خصائص الرابط نفسه
     parsed = _extract_datetime_from_node_attributes(
         anchor
     )
@@ -461,7 +587,6 @@ def _extract_entry_time(anchor):
     if parsed:
         return parsed
 
-    # عناصر time داخل الرابط
     for time_tag in anchor.find_all("time"):
         value = (
             time_tag.get("datetime")
@@ -482,7 +607,6 @@ def _extract_entry_time(anchor):
         if parsed:
             return parsed
 
-    # النص داخل الرابط
     anchor_text = anchor.get_text(
         " ",
         strip=True,
@@ -495,7 +619,6 @@ def _extract_entry_time(anchor):
     if parsed:
         return parsed
 
-    # العناصر القريبة
     parent = anchor.parent
 
     for _ in range(3):
@@ -537,7 +660,6 @@ def _extract_entry_time(anchor):
 
         parent = parent.parent
 
-    # الأب المباشر فقط
     direct_parent = anchor.parent
 
     if direct_parent is not None:
@@ -561,13 +683,6 @@ def _extract_entry_time(anchor):
 # ============================================================
 
 def _article_url(url: str) -> bool:
-    """
-    تحديد ما إذا كان الرابط يمكن أن يكون مقالًا.
-
-    هذه الدالة لا تعتبر الرابط مقالًا بشكل نهائي.
-    التحقق النهائي يتم بعد فتح الصفحة نفسها.
-    """
-
     try:
         parsed = urllib.parse.urlparse(url)
 
@@ -595,17 +710,12 @@ def _article_url(url: str) -> bool:
             for part in parts
         }
 
-        # -------------------------------------------------
-        # صفحات القائمة
-        # -------------------------------------------------
-
         if path.lower() in {
             "/news",
             "/أخبار",
         }:
             return False
 
-        # /news/2
         if re.fullmatch(
             r"news/\d+",
             path.lstrip("/"),
@@ -613,16 +723,11 @@ def _article_url(url: str) -> bool:
         ):
             return False
 
-        # /أخبار/2
         if re.fullmatch(
             r"أخبار/\d+",
             path.lstrip("/"),
         ):
             return False
-
-        # -------------------------------------------------
-        # استبعاد صريح للمباراة
-        # -------------------------------------------------
 
         if any(
             part.lower()
@@ -630,10 +735,6 @@ def _article_url(url: str) -> bool:
             for part in parts
         ):
             return False
-
-        # -------------------------------------------------
-        # حماية إضافية للمسارات العربية
-        # -------------------------------------------------
 
         blocked_exact_segments = {
             "كرة القدم/مباراة",
@@ -656,10 +757,6 @@ def _article_url(url: str) -> bool:
             for value in blocked_exact_segments
         }:
             return False
-
-        # -------------------------------------------------
-        # صفحات تحتوي معرفًا رقميًا في آخر الرابط
-        # -------------------------------------------------
 
         last = parts[-1]
 
@@ -687,9 +784,6 @@ def _article_url(url: str) -> bool:
         ):
             return True
 
-        # بعض روابط كووورة الحديثة لا تحتوي معرفًا رقميًا.
-        # لذلك لا نرفضها هنا نهائيًا، لكن يجب أن تجتاز
-        # التحقق الحقيقي للصفحة لاحقًا.
         return True
 
     except Exception:
@@ -703,10 +797,6 @@ def _article_url(url: str) -> bool:
 def _parse_jsonld_datetime(
     soup: BeautifulSoup,
 ):
-    """
-    البحث عن datePublished داخل JSON-LD.
-    """
-
     for script in soup.find_all(
         "script",
         type="application/ld+json",
@@ -793,20 +883,12 @@ def _extract_article_datetime_from_html(
     6. النص الظاهر القريب من المقال
     """
 
-    # -------------------------------------------------
-    # 1) JSON-LD
-    # -------------------------------------------------
-
     parsed = _parse_jsonld_datetime(
         soup
     )
 
     if parsed:
         return parsed, "jsonld"
-
-    # -------------------------------------------------
-    # 2) Meta tags
-    # -------------------------------------------------
 
     meta_names = [
         ("property", "article:published_time"),
@@ -843,10 +925,6 @@ def _extract_article_datetime_from_html(
         if parsed:
             return parsed, f"meta:{name}"
 
-    # -------------------------------------------------
-    # 3) عناصر time
-    # -------------------------------------------------
-
     for time_tag in soup.find_all("time"):
         parsed = _extract_datetime_from_node_attributes(
             time_tag
@@ -866,11 +944,6 @@ def _extract_article_datetime_from_html(
 
         if parsed:
             return parsed, "time_text"
-
-    # -------------------------------------------------
-    # 4) البحث في العناصر التي تحمل أسماء مرتبطة
-    # بالنشر أو التاريخ.
-    # -------------------------------------------------
 
     date_keywords = [
         "published",
@@ -933,14 +1006,6 @@ def _extract_article_datetime_from_html(
 def _is_actual_news_article(
     soup: BeautifulSoup,
 ) -> bool:
-    """
-    يمنع اعتبار صفحات المباريات أو الصفحات العامة
-    مقالات لمجرد وجود تاريخ فيها.
-    """
-
-    # -------------------------------------------------
-    # 1) JSON-LD
-    # -------------------------------------------------
 
     for script in soup.find_all(
         "script",
@@ -1000,16 +1065,8 @@ def _is_actual_news_article(
             ):
                 return True
 
-    # -------------------------------------------------
-    # 2) عناصر المقال
-    # -------------------------------------------------
-
     if soup.find("article"):
         return True
-
-    # -------------------------------------------------
-    # 3) مؤشرات واضحة على أن الصفحة تحتوي عنوان مقال
-    # -------------------------------------------------
 
     headline = soup.find(
         attrs={
@@ -1059,12 +1116,6 @@ def _verify_article_page(
     cycle_start: datetime,
     max_age: int,
 ):
-    """
-    يفتح صفحة الخبر نفسها ويقرر:
-    - هل هي مقال؟
-    - ما وقت النشر الحقيقي؟
-    - هل يقع ضمن آخر 3 ساعات؟
-    """
 
     try:
         raw_data, resolved_url = _fetch_url(
@@ -1083,25 +1134,18 @@ def _verify_article_page(
 
         return None
 
-    # -------------------------------------------------
-    # التحقق من الرابط النهائي
-    # -------------------------------------------------
-
     if not _article_url(
         resolved_url
     ):
         print(
             "   🚫 الرابط النهائي ليس رابط مقال:"
         )
+
         print(
             f"      {resolved_url}"
         )
 
         return None
-
-    # -------------------------------------------------
-    # التحقق من نوع الصفحة
-    # -------------------------------------------------
 
     if not _is_actual_news_article(
         soup
@@ -1111,10 +1155,6 @@ def _verify_article_page(
         )
 
         return None
-
-    # -------------------------------------------------
-    # استخراج التاريخ الحقيقي
-    # -------------------------------------------------
 
     published_dt, method = (
         _extract_article_datetime_from_html(
@@ -1129,10 +1169,6 @@ def _verify_article_page(
         )
 
         return None
-
-    # -------------------------------------------------
-    # التحقق النهائي من نافذة الـ3 ساعات
-    # -------------------------------------------------
 
     if not _is_recent(
         published_dt,
@@ -1179,6 +1215,7 @@ def _parse_kooora_page(
     parsed_times = 0
     missing_times = 0
     rejected_non_articles = 0
+    filtered_titles = 0
 
     for anchor in soup.find_all(
         "a",
@@ -1204,11 +1241,6 @@ def _parse_kooora_page(
             1,
         )[0]
 
-        # -------------------------------------------------
-        # استبعاد الروابط غير الإخبارية
-        # قبل استخراج الوقت.
-        # -------------------------------------------------
-
         if not _article_url(link):
             rejected_non_articles += 1
             continue
@@ -1217,6 +1249,8 @@ def _parse_kooora_page(
 
         if link in seen:
             continue
+
+        seen.add(link)
 
         title = anchor.get_text(
             " ",
@@ -1232,6 +1266,26 @@ def _parse_kooora_page(
         )
 
         if len(title) < 10:
+            continue
+
+        # -------------------------------------------------
+        # فلترة العنوان فقط.
+        #
+        # مهم:
+        # لا يتم فحص محتوى الخبر هنا أو لاحقًا لهذا السبب.
+        # -------------------------------------------------
+
+        if _is_filtered_title(
+            title
+        ):
+            filtered_titles += 1
+
+            _record_filtered_title(
+                title=title,
+                link=link,
+                source=source_name,
+            )
+
             continue
 
         published_dt = _extract_entry_time(
@@ -1257,13 +1311,9 @@ def _parse_kooora_page(
                     f"   📰 {title[:180]}"
                 )
 
-            # لا نستبعده مباشرة.
-            # سيتمكن النظام من التحقق منه لاحقًا
-            # إذا احتجنا لذلك.
             continue
 
         parsed_times += 1
-        seen.add(link)
 
         results.append(
             {
@@ -1281,7 +1331,8 @@ def _parse_kooora_page(
         f"article_candidates={article_candidates}, "
         f"parsed_times={parsed_times}, "
         f"missing_times={missing_times}, "
-        f"rejected_non_articles={rejected_non_articles}"
+        f"rejected_non_articles={rejected_non_articles}, "
+        f"filtered_titles={filtered_titles}"
     )
 
     return results
@@ -1377,13 +1428,6 @@ def _fetch_kooora_direct(
                     "list_published_dt"
                 )
 
-                # -------------------------------------------------
-                # الفلتر الأولي فقط.
-                #
-                # نستخدم 9 ساعات بدل 3 لأن وقت القائمة
-                # قد يكون متأخرًا/مختلفًا عن وقت المقال.
-                # -------------------------------------------------
-
                 if list_dt and not _is_recent(
                     list_dt,
                     cycle_start,
@@ -1392,22 +1436,12 @@ def _fetch_kooora_direct(
                     page_old += 1
                     continue
 
-                # -------------------------------------------------
-                # منع ما تم معالجته سابقًا.
-                # -------------------------------------------------
-
                 if db.is_processed(
                     link,
                     title,
                 ):
                     page_processed += 1
                     continue
-
-                # -------------------------------------------------
-                # التحقق الحقيقي من صفحة الخبر.
-                #
-                # هذه هي النقطة الأساسية الجديدة.
-                # -------------------------------------------------
 
                 print(
                     "\n🔎 التحقق من صفحة الخبر:"
@@ -1455,10 +1489,6 @@ def _fetch_kooora_direct(
                     f"   🔍 مصدر الوقت: "
                     f"{verified['date_method']}"
                 )
-
-                # -------------------------------------------------
-                # تحقق نهائي إضافي.
-                # -------------------------------------------------
 
                 if not _is_recent(
                     real_published_dt,
@@ -1577,6 +1607,23 @@ def _fetch_google_news_fallback(
                 if normalized_title in seen_titles:
                     continue
 
+                # -------------------------------------------------
+                # فلترة عنوان الخبر الأصلي فقط.
+                # يتم تنفيذها أيضًا في خطة Google News الاحتياطية.
+                # -------------------------------------------------
+
+                if _is_filtered_title(
+                    clean_title
+                ):
+                    _record_filtered_title(
+                        title=clean_title,
+                        link=link,
+                        source=source_name,
+                    )
+
+                    seen_links.add(link)
+                    continue
+
                 if db.is_processed(
                     link,
                     clean_title,
@@ -1610,10 +1657,6 @@ def _fetch_google_news_fallback(
                     max_age,
                 ):
                     continue
-
-                # -------------------------------------------------
-                # إذا كان الرابط من كووورة، نتحقق من الصفحة نفسها.
-                # -------------------------------------------------
 
                 if "kooora.com" in (
                     urllib.parse.urlparse(
@@ -1685,6 +1728,12 @@ def fetch_prioritized_news(
     cycle_start: datetime | None = None,
 ) -> list:
 
+    # -------------------------------------------------
+    # بدء تقرير فلترة العناوين لهذه الدورة.
+    # -------------------------------------------------
+
+    _reset_title_filter_report()
+
     settings = CONFIG.get(
         "fetch_settings",
         {},
@@ -1739,6 +1788,11 @@ def fetch_prioritized_news(
     print(
         "🔍 نافذة الفلترة الأولية من القائمة: "
         "آخر 9 ساعات."
+    )
+
+    print(
+        "🚫 سيتم استبعاد أي عنوان يحتوي على "
+        "«القنوات الناقلة» أو «القناة الناقلة»."
     )
 
     print(
@@ -1838,6 +1892,10 @@ def fetch_prioritized_news(
             None,
         )
 
+    filtered_count = len(
+        _FILTERED_TITLE_ITEMS
+    )
+
     print(
         "\n📊 النتيجة النهائية:"
     )
@@ -1845,6 +1903,11 @@ def fetch_prioritized_news(
     print(
         f"📰 الأخبار المقبولة: "
         f"{len(final_news)}"
+    )
+
+    print(
+        f"🚫 الأخبار المستبعدة بسبب العنوان: "
+        f"{filtered_count}"
     )
 
     print(
