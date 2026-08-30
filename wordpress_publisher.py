@@ -8,6 +8,7 @@ wordpress_publisher.py
 - Creates published post directly with featured image and resolved categories.
 """
 
+import time
 import requests
 from requests.auth import HTTPBasicAuth
 from config import CONFIG
@@ -32,6 +33,123 @@ HEADERS_IMAGE = {
 }
 
 _category_cache = {}
+
+
+# =========================================================
+# معالجة أخطاء WordPress المؤقتة
+# =========================================================
+
+WP_MAX_RETRIES = 3
+
+# الأخطاء التي يمكن أن تكون مؤقتة بسبب Cloudflare / WAF / السيرفر
+RETRY_STATUS_CODES = {
+    403,
+    429,
+    500,
+    502,
+    503,
+    504,
+}
+
+RETRY_DELAYS = [3, 7, 12]
+
+
+def _wp_request(
+    method: str,
+    url: str,
+    *,
+    auth=None,
+    headers=None,
+    timeout=15,
+    **kwargs,
+):
+    """
+    تنفيذ طلب إلى WordPress REST API مع إعادة المحاولة
+    عند الأخطاء المؤقتة أو مشاكل الاتصال.
+
+    لا تتم إعادة المحاولة عند أخطاء المصادقة الدائمة مثل 401.
+    """
+
+    last_exception = None
+
+    for attempt in range(1, WP_MAX_RETRIES + 1):
+
+        try:
+            resp = requests.request(
+                method,
+                url,
+                auth=auth,
+                headers=headers,
+                timeout=timeout,
+                **kwargs,
+            )
+
+            # نجاح الطلب
+            if resp.ok:
+                return resp
+
+            # خطأ يمكن أن يكون مؤقتًا
+            if resp.status_code in RETRY_STATUS_CODES:
+
+                if attempt < WP_MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt - 1]
+
+                    retry_after = resp.headers.get("Retry-After")
+
+                    if retry_after:
+                        try:
+                            delay = max(
+                                delay,
+                                min(int(retry_after), 30)
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+                    print(
+                        f"⚠️ WordPress أعاد HTTP "
+                        f"{resp.status_code} "
+                        f"(المحاولة {attempt}/{WP_MAX_RETRIES})."
+                    )
+
+                    print(
+                        f"🔄 إعادة المحاولة بعد {delay} ثوانٍ..."
+                    )
+
+                    time.sleep(delay)
+                    continue
+
+            # أخطاء غير قابلة لإعادة المحاولة
+            return resp
+
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.RequestException,
+        ) as e:
+
+            last_exception = e
+
+            if attempt < WP_MAX_RETRIES:
+                delay = RETRY_DELAYS[attempt - 1]
+
+                print(
+                    f"⚠️ تعذر الاتصال بـ WordPress "
+                    f"(المحاولة {attempt}/{WP_MAX_RETRIES}): {e}"
+                )
+
+                print(
+                    f"🔄 إعادة المحاولة بعد {delay} ثوانٍ..."
+                )
+
+                time.sleep(delay)
+                continue
+
+            break
+
+    if last_exception:
+        raise last_exception
+
+    return None
 
 
 def _get_wp_credentials():
@@ -79,8 +197,11 @@ def _print_wp_error(resp, action="WordPress"):
                 "خادم الحماية قبل أن يصل إلى WordPress."
             )
             print(
-                "➡️ راجع إعدادات حماية الموقع للسماح بطلبات REST API "
-                "الشرعية الخاصة بالموقع."
+                "➡️ تمت إعادة المحاولة تلقائيًا قبل اعتبار الطلب فاشلًا."
+            )
+            print(
+                "➡️ إذا استمر 403 بعد جميع المحاولات، راجع إعدادات "
+                "حماية الموقع للسماح بطلبات REST API الشرعية."
             )
         else:
             print(
@@ -99,6 +220,7 @@ def test_authentication() -> bool:
     Validates WordPress credentials before processing to avoid wasting API quota.
     كما يتحقق أولًا من إمكانية الوصول إلى REST API نفسه.
     """
+
     site_url, auth, username = _get_wp_credentials()
 
     headers = HEADERS_GET.copy()
@@ -107,64 +229,87 @@ def test_authentication() -> bool:
         # ---------------------------------------------------------
         # 1) اختبار REST API بدون مصادقة
         # ---------------------------------------------------------
-        api_check = requests.get(
+
+        api_check = _wp_request(
+            "GET",
             f"{site_url}/wp-json/",
             headers=headers,
             timeout=15,
         )
 
-        if api_check.status_code == 200:
+        if api_check is not None and api_check.status_code == 200:
             print("✅ WordPress REST API متاح.")
 
-        elif api_check.status_code == 403:
+        elif (
+            api_check is not None
+            and api_check.status_code == 403
+        ):
             print(
-                "❌ REST API نفسه محجوب بدون حتى الوصول إلى مرحلة المصادقة."
+                "⚠️ REST API الأساسي أعاد HTTP 403 بعد "
+                "إعادة المحاولة."
             )
-            _print_wp_error(api_check, "WordPress REST API check")
-            return False
 
-        else:
+            _print_wp_error(
+                api_check,
+                "WordPress REST API check"
+            )
+
             print(
-                f"⚠️ فحص REST API أعاد HTTP {api_check.status_code}."
+                "🔄 لن يتم إيقاف الدورة الآن، "
+                "وسيتم اختبار المصادقة مباشرة."
+            )
+
+        elif api_check is not None:
+            print(
+                f"⚠️ فحص REST API أعاد HTTP "
+                f"{api_check.status_code}."
             )
 
         # ---------------------------------------------------------
         # 2) اختبار المصادقة
         # ---------------------------------------------------------
-        resp = requests.get(
+
+        resp = _wp_request(
+            "GET",
             f"{site_url}/wp-json/wp/v2/users/me",
             auth=auth,
             headers=headers,
             timeout=15,
         )
 
-        if resp.status_code == 200:
+        if resp is not None and resp.status_code == 200:
             user_data = resp.json()
+
             print(
                 f"✅ WordPress authentication successful — User: "
                 f"{user_data.get('name', username)}"
             )
+
             return True
 
-        _print_wp_error(resp, "WordPress authentication")
-
-        if resp.status_code == 401:
-            print(
-                "Possible reasons:\n"
-                "  1) Application Password expired/invalid — generate a new one.\n"
-                "  2) Typo in credentials.\n"
-                "  3) Username mismatch.\n"
-                "  4) Server/Hosting stripping Authorization header."
+        if resp is not None:
+            _print_wp_error(
+                resp,
+                "WordPress authentication"
             )
 
-        elif resp.status_code == 403:
-            print(
-                "Possible reasons:\n"
-                "  1) Cloudflare/WAF/hosting security blocked the request.\n"
-                "  2) Security plugin blocked REST API authentication.\n"
-                "  3) The WordPress user lacks the required permissions.\n"
-                "  4) Authorization header is being removed by the server/proxy."
-            )
+            if resp.status_code == 401:
+                print(
+                    "Possible reasons:\n"
+                    "  1) Application Password expired/invalid — generate a new one.\n"
+                    "  2) Typo in credentials.\n"
+                    "  3) Username mismatch.\n"
+                    "  4) Server/Hosting stripping Authorization header."
+                )
+
+            elif resp.status_code == 403:
+                print(
+                    "Possible reasons:\n"
+                    "  1) Cloudflare/WAF/hosting security blocked the request.\n"
+                    "  2) Security plugin blocked REST API authentication.\n"
+                    "  3) The WordPress user lacks the required permissions.\n"
+                    "  4) Authorization header is being removed by the server/proxy."
+                )
 
         return False
 
@@ -178,6 +323,7 @@ def _get_category_id(name: str) -> int | None:
     Looks up an existing category ID by name.
     Does not create new categories — returns None if not found.
     """
+
     if name in _category_cache:
         return _category_cache[name]
 
@@ -186,16 +332,26 @@ def _get_category_id(name: str) -> int | None:
     headers = HEADERS_GET.copy()
 
     try:
-        resp = requests.get(
+        resp = _wp_request(
+            "GET",
             f"{site_url}/wp-json/wp/v2/categories",
-            params={"search": name, "per_page": 5},
+            params={
+                "search": name,
+                "per_page": 5
+            },
             auth=auth,
             headers=headers,
             timeout=15,
         )
 
+        if resp is None:
+            return None
+
         if not resp.ok:
-            _print_wp_error(resp, f"Category search '{name}'")
+            _print_wp_error(
+                resp,
+                f"Category search '{name}'"
+            )
             return None
 
         for cat in resp.json():
@@ -207,10 +363,13 @@ def _get_category_id(name: str) -> int | None:
             f"⚠️ Category '{name}' not found in WordPress — "
             f"post will be created without it."
         )
+
         return None
 
     except Exception as e:
-        print(f"⚠️ Category search failed for '{name}': {e}")
+        print(
+            f"⚠️ Category search failed for '{name}': {e}"
+        )
 
     return None
 
@@ -218,35 +377,46 @@ def _get_category_id(name: str) -> int | None:
 def resolve_category_ids(category_names: list) -> list:
     # Uncategorized يجب أن يكون موجودًا دائمًا،
     # مع الاحتفاظ بباقي التصنيفات التي يحددها النظام.
+
     category_names = category_names or []
 
     if not any(
         str(name).strip().lower() == "uncategorized"
         for name in category_names
     ):
-        category_names = ["Uncategorized"] + list(category_names)
+        category_names = [
+            "Uncategorized"
+        ] + list(category_names)
 
     ids = []
+
     for name in category_names:
         cat_id = _get_category_id(name)
+
         if cat_id:
             ids.append(cat_id)
 
     return ids
 
 
-def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
+def upload_featured_image(
+    image_url: str,
+    alt_text: str = ""
+) -> int | None:
+
     if not image_url:
         return None
 
     site_url, auth, _ = _get_wp_credentials()
 
     try:
+        # تحميل الصورة من المصدر الخارجي
         img_resp = requests.get(
             image_url,
             headers=HEADERS_IMAGE,
             timeout=15,
         )
+
         img_resp.raise_for_status()
 
         content_type = img_resp.headers.get(
@@ -262,20 +432,29 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
             return None
 
         ext = "jpg"
+
         if "png" in content_type:
             ext = "png"
+
         elif "webp" in content_type:
             ext = "webp"
 
-        filename = f"featured-{abs(hash(image_url)) % 10**8}.{ext}"
+        filename = (
+            f"featured-{abs(hash(image_url)) % 10**8}.{ext}"
+        )
 
         upload_headers = DEFAULT_HEADERS.copy()
+
         upload_headers.update({
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"'
+            ),
             "Content-Type": content_type,
         })
 
-        upload_resp = requests.post(
+        # رفع الصورة إلى WordPress مع إعادة المحاولة
+        upload_resp = _wp_request(
+            "POST",
             f"{site_url}/wp-json/wp/v2/media",
             auth=auth,
             headers=upload_headers,
@@ -283,8 +462,13 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
             timeout=20,
         )
 
-        if not upload_resp.ok:
-            _print_wp_error(upload_resp, "Featured image upload")
+        if upload_resp is None or not upload_resp.ok:
+            if upload_resp is not None:
+                _print_wp_error(
+                    upload_resp,
+                    "Featured image upload"
+                )
+
             return None
 
         media_data = upload_resp.json()
@@ -293,15 +477,18 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
         if alt_text:
             alt_headers = HEADERS_JSON.copy()
 
-            alt_resp = requests.post(
+            alt_resp = _wp_request(
+                "POST",
                 f"{site_url}/wp-json/wp/v2/media/{media_id}",
                 auth=auth,
-                json={"alt_text": alt_text},
+                json={
+                    "alt_text": alt_text
+                },
                 headers=alt_headers,
                 timeout=10,
             )
 
-            if not alt_resp.ok:
+            if alt_resp is not None and not alt_resp.ok:
                 _print_wp_error(
                     alt_resp,
                     "Featured image alt text update"
@@ -310,7 +497,10 @@ def upload_featured_image(image_url: str, alt_text: str = "") -> int | None:
         return media_id
 
     except Exception as e:
-        print(f"⚠️ Featured image upload failed: {e}")
+        print(
+            f"⚠️ Featured image upload failed: {e}"
+        )
+
         return None
 
 
@@ -319,7 +509,9 @@ def create_draft_post(
     source_url: str,
     image_url: str
 ) -> dict | None:
+
     main_title = ai_result["title"]
+
     site_url, auth, _ = _get_wp_credentials()
 
     media_id = upload_featured_image(
@@ -344,7 +536,9 @@ def create_draft_post(
     headers = HEADERS_JSON.copy()
 
     try:
-        resp = requests.post(
+        # إنشاء المقال مع إعادة المحاولة عند أخطاء WordPress المؤقتة
+        resp = _wp_request(
+            "POST",
             f"{site_url}/wp-json/wp/v2/posts",
             auth=auth,
             json=post_payload,
@@ -352,8 +546,13 @@ def create_draft_post(
             timeout=15,
         )
 
-        if not resp.ok:
-            _print_wp_error(resp, "Create WordPress post")
+        if resp is None or not resp.ok:
+            if resp is not None:
+                _print_wp_error(
+                    resp,
+                    "Create WordPress post"
+                )
+
             return None
 
         post_data = resp.json()
@@ -366,7 +565,9 @@ def create_draft_post(
         return post_data
 
     except Exception as e:
-        print(f"❌ Failed to create WordPress post: {e}")
+        print(
+            f"❌ Failed to create WordPress post: {e}"
+        )
 
         if hasattr(e, "response") and e.response is not None:
             print(
@@ -387,6 +588,7 @@ def publish_post(
     الدالة التي يتم استدعاؤها من main.py لنشر المقال
     وإرجاع رابط المنشور عند النجاح.
     """
+
     site_url, auth, _ = _get_wp_credentials()
 
     media_id = (
@@ -398,7 +600,9 @@ def publish_post(
         else None
     )
 
-    category_ids = resolve_category_ids(categories)
+    category_ids = resolve_category_ids(
+        categories
+    )
 
     post_payload = {
         "title": title,
@@ -413,7 +617,9 @@ def publish_post(
     headers = HEADERS_JSON.copy()
 
     try:
-        resp = requests.post(
+        # نشر المقال مع إعادة المحاولة عند الأخطاء المؤقتة
+        resp = _wp_request(
+            "POST",
             f"{site_url}/wp-json/wp/v2/posts",
             auth=auth,
             json=post_payload,
@@ -421,8 +627,13 @@ def publish_post(
             timeout=15,
         )
 
-        if not resp.ok:
-            _print_wp_error(resp, "Create WordPress post")
+        if resp is None or not resp.ok:
+            if resp is not None:
+                _print_wp_error(
+                    resp,
+                    "Create WordPress post"
+                )
+
             return None
 
         post_data = resp.json()
@@ -436,7 +647,9 @@ def publish_post(
         return post_link
 
     except Exception as e:
-        print(f"❌ Failed to create WordPress post: {e}")
+        print(
+            f"❌ Failed to create WordPress post: {e}"
+        )
 
         if hasattr(e, "response") and e.response is not None:
             print(
