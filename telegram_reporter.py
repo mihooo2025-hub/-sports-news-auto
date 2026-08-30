@@ -5,7 +5,7 @@ Sends a summary report to a Telegram group via Bot after each execution cycle:
 - Titles of rewritten and published articles.
 - Links to original source articles and published site articles.
 - Number of articles that failed or were skipped during processing.
-- Number and titles of articles filtered by title.
+- Number of articles excluded because of their titles.
 
 Requires Telegram Bot Token (from BotFather) and Group ID (chat_id) in config.json
 or provided via environment variables (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).
@@ -23,7 +23,7 @@ TG = CONFIG.get(
 
 BOT_TOKEN = TG.get(
     "bot_token",
-    "",
+    "" 
 )
 
 CHAT_ID = TG.get(
@@ -35,7 +35,6 @@ API_URL = (
     f"https://api.telegram.org/bot"
     f"{BOT_TOKEN}/sendMessage"
 )
-
 
 # الحد الأقصى الذي تسمح به Telegram للرسالة النصية تقريبًا.
 MAX_MESSAGE_LENGTH = 4096
@@ -71,7 +70,6 @@ def _send_message(
         return True
 
     except Exception as e:
-
         print(
             f"⚠️ Failed to send Telegram report: {e}"
         )
@@ -86,30 +84,24 @@ def send_cycle_report(
     filtered_title_items: list = None,
 ):
     """
+    إرسال تقرير دورة الأخبار إلى Telegram.
+
     published_items:
-        list of dicts:
-        {
-            "title": article title,
-            "source_url": original url,
-            "site_url": new published url
-        }
+        الأخبار التي تم نشرها بنجاح.
 
     checked_count:
         عدد الأخبار التي تم فحصها.
 
     skipped_count:
-        عدد الأخبار التي فشلت أو تم تجاوزها أثناء الدورة.
+        عدد الأخبار التي فشلت أو تم تجاوزها أثناء المعالجة.
 
     filtered_title_items:
         الأخبار التي تم استبعادها بسبب عنوانها.
 
-    ملاحظة:
-        يتم إرسال التقرير كاملًا في رسالة Telegram واحدة،
-        ولا يتم تقسيمه إلى عدة رسائل حسب عدد الأخبار.
+        مهم:
+        يتم استخدام هذا المتغير لحساب العدد فقط.
+        لا يتم إرسال عناوين الأخبار المستبعدة إلى Telegram.
     """
-
-    if filtered_title_items is None:
-        filtered_title_items = []
 
     if not _is_configured():
 
@@ -121,6 +113,14 @@ def send_cycle_report(
         return
 
     # =========================================================
+    # حساب عدد الأخبار المستبعدة بسبب العنوان فقط
+    # =========================================================
+
+    filtered_title_count = len(
+        filtered_title_items or []
+    )
+
+    # =========================================================
     # في حالة عدم نشر أي خبر
     # =========================================================
 
@@ -130,46 +130,16 @@ def send_cycle_report(
             f"📊 <b>تقرير دورة الأخبار</b>\n\n"
             f"🔍 تم فحص: {checked_count} خبر\n"
             f"❌ فشل/تجاوز: {skipped_count} خبر\n"
-            f"🚫 استُبعد بسبب العنوان: "
-            f"{len(filtered_title_items)} خبر\n"
+            f"🚫 مستبعد بسبب العنوان: "
+            f"{filtered_title_count} خبر\n"
             f"✅ تم النشر: 0 خبر\n\n"
             f"لم يُنشر أي خبر جديد في هذه الدورة."
         )
 
-        # -----------------------------------------------------
-        # إضافة عناوين الأخبار المستبعدة
-        # -----------------------------------------------------
-
-        if filtered_title_items:
-
-            message += (
-                "\n\n🚫 <b>الأخبار المستبعدة "
-                "بسبب العنوان:</b>\n"
-            )
-
-            for i, item in enumerate(
-                filtered_title_items,
-                start=1,
-            ):
-
-                title = item.get(
-                    "title",
-                    "بدون عنوان",
-                )
-
-                title = html.escape(
-                    str(title)
-                )
-
-                message += (
-                    f"{i}. {title}\n"
-                )
-
         if len(message) > MAX_MESSAGE_LENGTH:
 
             print(
-                "⚠️ تقرير Telegram تجاوز "
-                "الحد المسموح به."
+                "⚠️ تقرير Telegram تجاوز الحد المسموح به."
             )
 
             return
@@ -189,14 +159,14 @@ def send_cycle_report(
         f"✅ نُشر: {len(published_items)} | "
         f"🔍 فُحص: {checked_count} | "
         f"❌ فشل/تجاوز: {skipped_count}\n"
-        f"🚫 استُبعد بسبب العنوان: "
-        f"{len(filtered_title_items)}\n"
+        f"🚫 مستبعد بسبب العنوان: "
+        f"{filtered_title_count} خبر\n"
     )
 
     lines = []
 
     # =========================================================
-    # إضافة جميع الأخبار المنشورة
+    # إضافة الأخبار المنشورة فقط
     # =========================================================
 
     for i, item in enumerate(
@@ -224,6 +194,10 @@ def send_cycle_report(
             str(title)
         )
 
+        # =====================================================
+        # رابط الخبر الأصلي
+        # =====================================================
+
         if (
             source_url
             and source_url != "غير متوفر"
@@ -237,7 +211,13 @@ def send_cycle_report(
 
         else:
 
-            source_link = "غير متوفر"
+            source_link = (
+                "غير متوفر"
+            )
+
+        # =====================================================
+        # رابط الخبر المنشور
+        # =====================================================
 
         if (
             site_url
@@ -252,42 +232,15 @@ def send_cycle_report(
 
         else:
 
-            site_link = "غير متوفر"
+            site_link = (
+                "غير متوفر"
+            )
 
         lines.append(
             f"\n{i}. <b>{title}</b>\n"
             f"🔗 المصدر الأصلي: {source_link}\n"
             f"🌐 الخبر الجديد: {site_link}"
         )
-
-    # =========================================================
-    # إضافة الأخبار المستبعدة بسبب العنوان
-    # =========================================================
-
-    if filtered_title_items:
-
-        lines.append(
-            "\n\n🚫 <b>الأخبار المستبعدة "
-            "بسبب العنوان:</b>"
-        )
-
-        for i, item in enumerate(
-            filtered_title_items,
-            start=1,
-        ):
-
-            title = item.get(
-                "title",
-                "بدون عنوان",
-            )
-
-            title = html.escape(
-                str(title)
-            )
-
-            lines.append(
-                f"\n🚫 {i}. {title}"
-            )
 
     # =========================================================
     # رسالة واحدة فقط
