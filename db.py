@@ -1,7 +1,7 @@
 """
 db.py
 =====
-قاعدة بيانات SQLite لمنع تكرار الأخبار.
+قاعدة بيانات SQLite لمنع تكرار الأخبار وإعادة محاولة الأخبار الفاشلة.
 
 يتم منع التكرار عبر:
 - الرابط بعد تنظيفه.
@@ -12,7 +12,10 @@ db.py
 
 الأخبار التي تفشل في المعالجة بحالة publish_failed
 يمكن إعادة محاولتها لمدة أقصاها 6 ساعات من وقت أول فشل.
-بعد مرور 6 ساعات يتم السماح بمحاولة جديدة.
+
+كما يتم الاحتفاظ بالأخبار التي تم اكتشافها من كووورة
+لكن تعذر فتح صفحة الخبر أو التحقق منها، حتى لا تضيع
+ويتم إعادة محاولة التحقق منها خلال فترة الـ6 ساعات.
 """
 
 import hashlib
@@ -84,6 +87,11 @@ def init_db():
             ON processed_news(kooora_id)
         """)
 
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_status_created_at
+            ON processed_news(status, created_at)
+        """)
+
         conn.commit()
 
     finally:
@@ -133,9 +141,6 @@ def _extract_kooora_id(url: str) -> str:
     أمثلة:
         .../bltc03f5c344f659766
         .../blt16a7be99bdb47db9
-
-    المعرّف يعتبر أقوى من اختلافات الرابط،
-    لأن كووورة قد تعرض الرابط بصيغ مختلفة لنفس الخبر.
     """
 
     if not url:
@@ -254,6 +259,73 @@ def _is_matching_record_processed(row) -> bool:
 
 
 # =========================================================
+# جلب الأخبار الفاشلة القابلة لإعادة المحاولة
+# =========================================================
+
+def get_retryable_failed_news(
+    limit: int = 200,
+) -> list:
+
+    """
+    يعيد الأخبار التي فشلت سابقًا وما زالت داخل
+    نافذة إعادة المحاولة البالغة 6 ساعات.
+
+    هذه الدالة مهمة حتى لا يعتمد استرجاع الخبر الفاشل
+    على ظهوره مرة أخرى في صفحات كووورة.
+    """
+
+    conn = sqlite3.connect(DB_PATH)
+
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                original_url,
+                title,
+                created_at
+            FROM processed_news
+            WHERE status = 'publish_failed'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+        rows = cur.fetchall()
+
+        results = []
+
+        for row in rows:
+
+            url = row[0]
+            title = row[1] or ""
+            created_at = row[2]
+
+            if not url:
+                continue
+
+            if _failed_retry_expired(
+                created_at
+            ):
+                continue
+
+            results.append(
+                {
+                    "title": title,
+                    "link": url,
+                    "failed_at": created_at,
+                }
+            )
+
+        return results
+
+    finally:
+        conn.close()
+
+
+# =========================================================
 # فحص الخبر
 # =========================================================
 
@@ -293,9 +365,6 @@ def is_processed(
 
         # -------------------------------------------------
         # 2. فحص معرّف كووورة
-        #
-        # هذه هي طبقة الحماية الأساسية ضد اختلاف
-        # صيغ روابط نفس الخبر.
         # -------------------------------------------------
 
         if kooora_id:
@@ -363,7 +432,6 @@ def claim_news(
     try:
         cur = conn.cursor()
 
-        # قفل الكتابة حتى لا يقوم تشغيلان بحجز الخبر نفسه.
         cur.execute("BEGIN IMMEDIATE")
 
         # -------------------------------------------------
@@ -390,7 +458,6 @@ def claim_news(
             existing_status = existing[1]
             existing_created_at = existing[2]
 
-            # الخبر منشور أو processing أو متجاوز.
             if existing_status != "publish_failed":
                 conn.rollback()
                 return False
@@ -477,15 +544,10 @@ def claim_news(
                 existing_status = kooora_existing[1]
                 existing_created_at = kooora_existing[2]
 
-                # -------------------------------------------------
-                # نفس خبر كووورة موجود بالفعل.
-                # -------------------------------------------------
-
                 if existing_status != "publish_failed":
                     conn.rollback()
                     return False
 
-                # فشل حديث.
                 if not _failed_retry_expired(
                     existing_created_at
                 ):
@@ -515,7 +577,6 @@ def claim_news(
                     conn.commit()
                     return True
 
-                # فشل قديم.
                 cur.execute(
                     """
                     UPDATE processed_news
@@ -680,17 +741,6 @@ def update_claimed_url(
     final_url: str,
     title: str = "",
 ) -> bool:
-    """
-    تحديث سجل الخبر المحجوز بالرابط النهائي.
-
-    الهدف:
-    إذا كان رابط القائمة مختلفًا عن الرابط النهائي الذي
-    تم الوصول إليه، يتم تسجيل الهوية النهائية للخبر.
-
-    ترجع:
-        True  = تم تحديث السجل.
-        False = يوجد خبر آخر مسجل بنفس الهوية النهائية.
-    """
 
     original_normalized = _normalize_url(
         original_url
@@ -727,10 +777,6 @@ def update_claimed_url(
 
         cur.execute("BEGIN IMMEDIATE")
 
-        # -------------------------------------------------
-        # العثور على السجل الذي حجزناه.
-        # -------------------------------------------------
-
         cur.execute(
             """
             SELECT id
@@ -749,11 +795,6 @@ def update_claimed_url(
             return False
 
         current_id = current[0]
-
-        # -------------------------------------------------
-        # إذا كان الرابط النهائي مختلفًا، تأكد أنه ليس
-        # مسجلًا مسبقًا في سجل آخر.
-        # -------------------------------------------------
 
         if final_hash != original_hash:
             cur.execute(
@@ -776,10 +817,6 @@ def update_claimed_url(
                 conn.rollback()
                 return False
 
-        # -------------------------------------------------
-        # فحص معرّف كووورة.
-        # -------------------------------------------------
-
         if kooora_id:
             cur.execute(
                 """
@@ -800,13 +837,6 @@ def update_claimed_url(
             if duplicate_kooora:
                 conn.rollback()
                 return False
-
-        # -------------------------------------------------
-        # تحديث السجل.
-        #
-        # لا نغير created_at لأن وقت الحجز الأصلي مهم
-        # لفترة إعادة المحاولة.
-        # -------------------------------------------------
 
         cur.execute(
             """
@@ -905,6 +935,7 @@ def mark_processed(
         kooora_id = _extract_kooora_id(
             normalized_url
         )
+
         created_at = datetime.now(
             timezone.utc
         ).isoformat()
