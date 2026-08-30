@@ -108,14 +108,14 @@ def _wp_request(
             )
 
             # -------------------------------------------------
-            # نجاح
+            # نجاح الطلب
             # -------------------------------------------------
 
             if resp.ok:
                 return resp
 
             # -------------------------------------------------
-            # أخطاء مؤقتة يمكن إعادة المحاولة عليها
+            # أخطاء مؤقتة معروفة
             # -------------------------------------------------
 
             if resp.status_code in RETRY_STATUS_CODES:
@@ -134,6 +134,7 @@ def _wp_request(
                     )
 
                     if retry_after:
+
                         try:
                             delay = max(
                                 delay,
@@ -142,6 +143,7 @@ def _wp_request(
                                     30,
                                 ),
                             )
+
                         except (
                             ValueError,
                             TypeError,
@@ -159,7 +161,9 @@ def _wp_request(
                         f"{delay} ثوانٍ..."
                     )
 
-                    time.sleep(delay)
+                    time.sleep(
+                        delay
+                    )
 
                     continue
 
@@ -196,7 +200,9 @@ def _wp_request(
                     f"{delay} ثوانٍ..."
                 )
 
-                time.sleep(delay)
+                time.sleep(
+                    delay
+                )
 
                 continue
 
@@ -272,6 +278,14 @@ def _print_wp_error(
         "CF-Mitigated"
     )
 
+    cf_error_type = resp.headers.get(
+        "cf-error-type"
+    )
+
+    cf_error_origin = resp.headers.get(
+        "cf-error-origin"
+    )
+
     if server:
         print(
             f"ℹ️ Server: {server}"
@@ -285,6 +299,16 @@ def _print_wp_error(
     if cf_mitigated:
         print(
             f"ℹ️ CF-Mitigated: {cf_mitigated}"
+        )
+
+    if cf_error_type:
+        print(
+            f"ℹ️ CF-Error-Type: {cf_error_type}"
+        )
+
+    if cf_error_origin:
+        print(
+            f"ℹ️ CF-Error-Origin: {cf_error_origin}"
         )
 
     if resp.status_code == 403:
@@ -308,7 +332,7 @@ def _print_wp_error(
             )
 
             print(
-                "➡️ تم تنفيذ إعادة المحاولة تلقائيًا."
+                "➡️ تمت إعادة المحاولة تلقائيًا."
             )
 
         else:
@@ -319,11 +343,32 @@ def _print_wp_error(
                 "أو إضافة أمنية."
             )
 
+    elif resp.status_code == 525:
+
+        print(
+            "🚫 Cloudflare أعاد HTTP 525."
+        )
+
+        print(
+            "⚠️ هذا يعني فشل اتصال SSL بين Cloudflare "
+            "والخادم الأصلي."
+        )
+
+        print(
+            "ℹ️ لن يتم نشر المقال بدون الصورة "
+            "إذا كان الخطأ متعلقًا برفع الصورة."
+        )
+
+    else:
+
         print(
             f"Response: {resp.text[:500]}"
         )
 
-    else:
+    if resp.status_code in {
+        403,
+        525,
+    }:
 
         print(
             f"Response: {resp.text[:500]}"
@@ -338,12 +383,10 @@ def test_authentication() -> bool:
     """
     التحقق من إمكانية استخدام WordPress REST API.
 
-    ملاحظة مهمة:
     أخطاء 403/429/5xx ومشاكل الاتصال المؤقتة
     لا تؤدي مباشرة إلى إيقاف الدورة.
 
-    يتم إيقاف الدورة عند 401 فقط عندما تكون
-    المصادقة نفسها مرفوضة بشكل واضح.
+    401 فقط تعتبر مشكلة مصادقة واضحة.
     """
 
     site_url, auth, username = (
@@ -442,8 +485,7 @@ def test_authentication() -> bool:
         )
 
         print(
-            "ℹ️ سيتم السماح للدورة بالاستمرار، "
-            "وستتم إعادة المحاولة عند عمليات WordPress الفعلية."
+            "ℹ️ سيتم السماح للدورة بالاستمرار."
         )
 
         return True
@@ -471,7 +513,7 @@ def test_authentication() -> bool:
         return True
 
     # =====================================================
-    # 401 = مشكلة حقيقية في بيانات الدخول
+    # 401
     # =====================================================
 
     if (
@@ -499,7 +541,7 @@ def test_authentication() -> bool:
         return False
 
     # =====================================================
-    # 403 = لا نوقف الدورة بسبب احتمال الحماية
+    # 403
     # =====================================================
 
     if (
@@ -521,14 +563,13 @@ def test_authentication() -> bool:
         )
 
         print(
-            "🔄 ستتم محاولة عمليات WordPress الفعلية "
-            "مع إعادة المحاولة تلقائيًا."
+            "🔄 ستتم محاولة عمليات WordPress الفعلية."
         )
 
         return True
 
     # =====================================================
-    # 429 / 5xx
+    # أخطاء مؤقتة
     # =====================================================
 
     if (
@@ -539,6 +580,7 @@ def test_authentication() -> bool:
             502,
             503,
             504,
+            525,
         }
     ):
 
@@ -552,8 +594,8 @@ def test_authentication() -> bool:
         )
 
         print(
-            "ℹ️ لن يتم إيقاف الدورة "
-            "بسبب هذا الفحص المسبق."
+            "ℹ️ لن يتم إيقاف الدورة بسبب "
+            "الفحص المسبق."
         )
 
         return True
@@ -570,12 +612,12 @@ def test_authentication() -> bool:
         )
 
     print(
-        "⚠️ تعذر تأكيد المصادقة مسبقًا، "
-        "لكن لن يتم إيقاف الدورة."
+        "⚠️ تعذر تأكيد المصادقة مسبقًا."
     )
 
     print(
-        "ℹ️ سيتم الاعتماد على عمليات WordPress الفعلية."
+        "ℹ️ لن يتم إيقاف الدورة، "
+        "وستتم محاولة عمليات WordPress الفعلية."
     )
 
     return True
@@ -713,10 +755,15 @@ def upload_featured_image(
 
     try:
 
+        # -------------------------------------------------
+        # تنزيل الصورة من المصدر
+        # -------------------------------------------------
+
         img_resp = requests.get(
             image_url,
             headers=HEADERS_IMAGE,
-            timeout=15,
+            timeout=20,
+            allow_redirects=True,
         )
 
         img_resp.raise_for_status()
@@ -760,13 +807,21 @@ def upload_featured_image(
                 content_type,
         })
 
+        # -------------------------------------------------
+        # رفع الصورة
+        #
+        # مهم:
+        # إذا فشل الرفع فلن يتم السماح بنشر المقال
+        # بدون featured image.
+        # -------------------------------------------------
+
         upload_resp = _wp_request(
             "POST",
             f"{site_url}/wp-json/wp/v2/media",
             auth=auth,
             headers=upload_headers,
             data=img_resp.content,
-            timeout=20,
+            timeout=30,
         )
 
         if (
@@ -781,11 +836,23 @@ def upload_featured_image(
                     "Featured image upload",
                 )
 
+            print(
+                "🚫 لم يتم رفع الصورة المميزة."
+            )
+
+            print(
+                "🚫 لن يتم نشر المقال بدون الصورة المميزة."
+            )
+
             return None
 
         media_data = upload_resp.json()
 
         media_id = media_data["id"]
+
+        # -------------------------------------------------
+        # تحديث alt text
+        # -------------------------------------------------
 
         if alt_text:
 
@@ -814,12 +881,21 @@ def upload_featured_image(
                     "Featured image alt text update",
                 )
 
+        print(
+            f"🖼️ تم رفع الصورة المميزة بنجاح "
+            f"(Media ID: {media_id})"
+        )
+
         return media_id
 
     except Exception as e:
 
         print(
             f"⚠️ Featured image upload failed: {e}"
+        )
+
+        print(
+            "🚫 لن يتم نشر المقال بدون الصورة المميزة."
         )
 
         return None
@@ -846,6 +922,20 @@ def create_draft_post(
         alt_text=main_title,
     )
 
+    # -----------------------------------------------------
+    # إذا كانت هناك صورة مطلوبة ولم يتم رفعها،
+    # لا تنشئ المقال.
+    # -----------------------------------------------------
+
+    if image_url and not media_id:
+
+        print(
+            "🚫 تم إيقاف نشر المقال لأن "
+            "الصورة المميزة لم تُرفع بنجاح."
+        )
+
+        return None
+
     category_ids = (
         resolve_category_ids(
             ai_result.get(
@@ -865,6 +955,7 @@ def create_draft_post(
     }
 
     if media_id:
+
         post_payload[
             "featured_media"
         ] = media_id
@@ -879,7 +970,7 @@ def create_draft_post(
             auth=auth,
             json=post_payload,
             headers=headers,
-            timeout=15,
+            timeout=20,
         )
 
         if (
@@ -944,6 +1035,10 @@ def publish_post(
         _get_wp_credentials()
     )
 
+    # -----------------------------------------------------
+    # رفع الصورة قبل إنشاء المقال.
+    # -----------------------------------------------------
+
     media_id = (
         upload_featured_image(
             image_url,
@@ -952,6 +1047,26 @@ def publish_post(
         if image_url
         else None
     )
+
+    # -----------------------------------------------------
+    # التغيير الأساسي:
+    #
+    # إذا كانت هناك صورة من المصدر وفشل رفعها،
+    # لا يتم نشر المقال بدونها.
+    # -----------------------------------------------------
+
+    if image_url and not media_id:
+
+        print(
+            "🚫 فشل رفع الصورة المميزة."
+        )
+
+        print(
+            "🚫 تم إلغاء نشر المقال مؤقتًا "
+            "حتى لا يتم نشره بصورة الموقع الافتراضية."
+        )
+
+        return None
 
     category_ids = (
         resolve_category_ids(
@@ -965,6 +1080,11 @@ def publish_post(
         "status": "publish",
         "categories": category_ids,
     }
+
+    # -----------------------------------------------------
+    # لا يتم إرسال featured_media إلا بعد التأكد
+    # من نجاح رفع الصورة والحصول على Media ID.
+    # -----------------------------------------------------
 
     if media_id:
 
@@ -982,7 +1102,7 @@ def publish_post(
             auth=auth,
             json=post_payload,
             headers=headers,
-            timeout=15,
+            timeout=20,
         )
 
         if (
