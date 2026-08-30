@@ -6,6 +6,8 @@ db.py
 يتم منع التكرار عبر:
 - الرابط بعد تنظيف بسيط.
 - العنوان بعد تنظيف المسافات واسم المصدر فقط.
+- حجز الخبر بحالة processing قبل بدء معالجته،
+  لمنع تشغيلين متزامنين من معالجة الخبر نفسه.
 
 لا يتم إجراء تطبيع قوي للعناوين حتى لا يتم اعتبار
 أخبار مختلفة متشابهة على أنها خبر واحد.
@@ -198,6 +200,9 @@ def is_processed(
     الأخبار التي فشلت في المعالجة:
     - يعاد فحصها ومحاولة معالجتها خلال أول 6 ساعات.
     - بعد مرور 6 ساعات على أول فشل يتم تجاهلها نهائيًا.
+
+    الخبر الذي يحمل حالة processing يعتبر محجوزًا
+    ويمنع تشغيلًا آخر من معالجته في الوقت نفسه.
     """
 
     conn = sqlite3.connect(DB_PATH)
@@ -240,6 +245,268 @@ def is_processed(
     return False
 
 
+def claim_news(
+    url: str,
+    title: str = "",
+) -> bool:
+    """
+    حجز الخبر للمعالجة بشكل ذري.
+
+    الهدف:
+    منع تشغيلين متزامنين من الوصول إلى نفس الخبر
+    ثم نشره مرتين.
+
+    النتيجة:
+    - True  = تم حجز الخبر ويمكن بدء معالجته.
+    - False = الخبر موجود أو محجوز مسبقًا.
+
+    publish_failed:
+    إذا كان الخبر فاشلًا وما زال ضمن فترة إعادة المحاولة
+    يسمح له بحجز جديد.
+
+    بعد مرور 6 ساعات على أول فشل يسمح بالحجز مجددًا
+    مع تحديث حالة الخبر إلى processing.
+    """
+
+    normalized_url = _normalize_url(url)
+    url_hash = _hash_url(normalized_url)
+    title_hash = _hash_title(title)
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+    )
+
+    try:
+        cur = conn.cursor()
+
+        # --------------------------------------------------
+        # بدء معاملة كتابة مباشرة.
+        #
+        # هذا يجعل عملية:
+        # SELECT -> INSERT/UPDATE
+        # عملية ذرية بالنسبة للتشغيلات المتزامنة.
+        # --------------------------------------------------
+
+        cur.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        cur.execute(
+            """
+            SELECT
+                id,
+                status,
+                created_at
+            FROM processed_news
+            WHERE url_hash = ?
+            LIMIT 1
+            """,
+            (url_hash,),
+        )
+
+        existing = cur.fetchone()
+
+        # --------------------------------------------------
+        # يوجد سجل بنفس الرابط.
+        # --------------------------------------------------
+
+        if existing:
+            existing_id = existing[0]
+            existing_status = existing[1]
+            existing_created_at = existing[2]
+
+            # الخبر منشور أو محجوز أو تم تجاوزه.
+            if existing_status != "publish_failed":
+                conn.rollback()
+                return False
+
+            # فشل حديث: يسمح بإعادة المحاولة.
+            # لكن يجب تحويله إلى processing داخل
+            # نفس المعاملة قبل السماح بالمعالجة.
+            if not _failed_retry_expired(
+                existing_created_at
+            ):
+                cur.execute(
+                    """
+                    UPDATE processed_news
+                    SET
+                        original_url = ?,
+                        title = ?,
+                        title_hash = ?,
+                        status = ?,
+                        created_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized_url,
+                        title,
+                        title_hash,
+                        "processing",
+                        existing_created_at,
+                        existing_id,
+                    ),
+                )
+
+                conn.commit()
+                return True
+
+            # --------------------------------------------------
+            # انتهت فترة الفشل السابقة.
+            #
+            # نسمح بمحاولة جديدة ونبدأ فترة processing جديدة.
+            # --------------------------------------------------
+
+            cur.execute(
+                """
+                UPDATE processed_news
+                SET
+                    original_url = ?,
+                    title = ?,
+                    title_hash = ?,
+                    status = ?,
+                    created_at = ?
+                WHERE id = ?
+                """,
+                (
+                    normalized_url,
+                    title,
+                    title_hash,
+                    "processing",
+                    created_at,
+                    existing_id,
+                ),
+            )
+
+            conn.commit()
+            return True
+
+        # --------------------------------------------------
+        # لا يوجد سجل بالرابط.
+        #
+        # قبل الإدخال نفحص العنوان أيضًا.
+        # --------------------------------------------------
+
+        if title:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    status,
+                    created_at
+                FROM processed_news
+                WHERE title_hash = ?
+                LIMIT 1
+                """,
+                (title_hash,),
+            )
+
+            title_existing = cur.fetchone()
+
+            if title_existing:
+                existing_id = title_existing[0]
+                existing_status = title_existing[1]
+                existing_created_at = title_existing[2]
+
+                if existing_status != "publish_failed":
+                    conn.rollback()
+                    return False
+
+                if not _failed_retry_expired(
+                    existing_created_at
+                ):
+                    cur.execute(
+                        """
+                        UPDATE processed_news
+                        SET
+                            original_url = ?,
+                            title = ?,
+                            title_hash = ?,
+                            status = ?,
+                            created_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            normalized_url,
+                            title,
+                            title_hash,
+                            "processing",
+                            existing_created_at,
+                            existing_id,
+                        ),
+                    )
+
+                    conn.commit()
+                    return True
+
+                cur.execute(
+                    """
+                    UPDATE processed_news
+                    SET
+                        original_url = ?,
+                        title = ?,
+                        title_hash = ?,
+                        status = ?,
+                        created_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized_url,
+                        title,
+                        title_hash,
+                        "processing",
+                        created_at,
+                        existing_id,
+                    ),
+                )
+
+                conn.commit()
+                return True
+
+        # --------------------------------------------------
+        # الخبر جديد تمامًا.
+        # --------------------------------------------------
+
+        cur.execute(
+            """
+            INSERT INTO processed_news (
+                url_hash,
+                original_url,
+                title,
+                title_hash,
+                wp_post_id,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                url_hash,
+                normalized_url,
+                title,
+                title_hash,
+                None,
+                "processing",
+                created_at,
+            ),
+        )
+
+        conn.commit()
+        return True
+
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
 def get_recent_titles(
     limit: int = 40,
 ) -> list[str]:
@@ -271,7 +538,11 @@ def mark_processed(
     wp_post_id: int = None,
     status: str = "published",
 ):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+    )
+
     cur = conn.cursor()
 
     normalized_url = _normalize_url(url)
