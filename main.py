@@ -58,6 +58,7 @@ def mark_db_record(
 def map_category_names_to_ids(
     category_names: list,
 ) -> list:
+
     configured = CONFIG.get(
         "categories",
         [],
@@ -77,8 +78,9 @@ def map_category_names_to_ids(
 
 
 def run_pipeline():
+
     # ======================================================
-    # تثبيت وقت بداية الدورة قبل أي خطوة أخرى
+    # تثبيت وقت بداية الدورة
     # ======================================================
 
     cycle_start = datetime.now(
@@ -96,7 +98,12 @@ def run_pipeline():
 
     db.init_db()
 
+    # ======================================================
+    # فحص WordPress
+    # ======================================================
+
     if not test_authentication():
+
         print(
             "❌ تعذر الوصول إلى WordPress — "
             "تم إيقاف الدورة."
@@ -110,7 +117,7 @@ def run_pipeline():
         return
 
     # ======================================================
-    # جلب الأخبار ضمن نافذة 3 ساعات من بداية الدورة
+    # جلب الأخبار
     # ======================================================
 
     news_items = fetch_prioritized_news(
@@ -118,7 +125,7 @@ def run_pipeline():
     )
 
     # ======================================================
-    # الأخبار التي تم استبعادها بسبب عنوانها
+    # الأخبار المستبعدة بسبب العنوان
     # ======================================================
 
     filtered_title_items = (
@@ -130,16 +137,21 @@ def run_pipeline():
     )
 
     if not news_items:
+
         print(
             "ℹ️ لم يتم العثور على أخبار جديدة ضمن آخر 3 ساعات "
             "من بداية الدورة."
         )
 
+        # --------------------------------------------------
+        # مهم:
+        # send_cycle_report يقبل 3 معاملات فقط.
+        # --------------------------------------------------
+
         send_cycle_report(
             [],
             0,
             0,
-            filtered_title_items,
         )
 
         return
@@ -158,6 +170,10 @@ def run_pipeline():
     blocked_domain = 0
 
     quota_exhausted = False
+
+    # ======================================================
+    # معالجة الأخبار
+    # ======================================================
 
     for idx, item in enumerate(
         news_items,
@@ -185,7 +201,9 @@ def run_pipeline():
         )
 
         # ==================================================
-        # حجز الخبر لمنع التكرار
+        # الحجز الأولي
+        #
+        # يحمي من تشغيلين متزامنين قبل استخراج المقال.
         # ==================================================
 
         try:
@@ -195,6 +213,7 @@ def run_pipeline():
             )
 
         except Exception as e:
+
             print(
                 f"⚠️ تعذر حجز الخبر في قاعدة البيانات: {e}"
             )
@@ -207,6 +226,7 @@ def run_pipeline():
             continue
 
         if not claimed:
+
             print(
                 "⏭️ تم تجاوز الخبر لأنه موجود أو "
                 "محجوز مسبقًا في قاعدة البيانات."
@@ -224,11 +244,13 @@ def run_pipeline():
         # ==================================================
 
         try:
+
             extracted_data = extract_article(
                 source_link
             )
 
         except Exception as e:
+
             print(
                 f"⚠️ حدث خطأ أثناء استخراج المقال: {e}"
             )
@@ -255,6 +277,7 @@ def run_pipeline():
         if extracted_data.get(
             "blocked"
         ):
+
             print(
                 "🚫 تجاوز الخبر لأنه ينتمي إلى نطاق ممنوع."
             )
@@ -294,6 +317,64 @@ def run_pipeline():
         )
 
         # ==================================================
+        # حماية إضافية ضد اختلاف رابط نفس خبر كووورة
+        #
+        # بعد فتح المقال نحصل على الرابط النهائي.
+        # نقوم بتحديث سجل الحجز إلى الرابط النهائي
+        # ومعرّف bl... إن وجد.
+        #
+        # إذا اكتشفنا أن هناك خبرًا آخر يحمل نفس معرّف
+        # كووورة، نتجاوز هذا الخبر بدل نشره مرة ثانية.
+        # ==================================================
+
+        try:
+
+            canonical_updated = db.update_claimed_url(
+                original_url=source_link,
+                final_url=resolved_url,
+                title=source_title,
+            )
+
+        except Exception as e:
+
+            print(
+                f"⚠️ تعذر تحديث هوية الخبر النهائية في قاعدة البيانات: {e}"
+            )
+
+            print(
+                "⏭️ سيتم تجاوز الخبر حفاظًا على منع التكرار."
+            )
+
+            mark_db_record(
+                source_link,
+                source_title,
+                "skipped_duplicate",
+            )
+
+            skipped_count += 1
+            continue
+
+        if not canonical_updated:
+
+            print(
+                "⏭️ تم اكتشاف أن الرابط النهائي أو "
+                "معرّف كووورة مسجل مسبقًا."
+            )
+
+            print(
+                "🚫 لن يتم نشر الخبر لتجنب التكرار."
+            )
+
+            mark_db_record(
+                source_link,
+                source_title,
+                "skipped_duplicate",
+            )
+
+            skipped_count += 1
+            continue
+
+        # ==================================================
         # فشل استخراج المحتوى
         # ==================================================
 
@@ -303,6 +384,7 @@ def run_pipeline():
             )
             or not raw_content
         ):
+
             print(
                 "⚠️ تعذر جلب محتوى المقال."
             )
@@ -313,7 +395,7 @@ def run_pipeline():
             )
 
             mark_db_record(
-                source_link,
+                resolved_url,
                 source_title,
                 "publish_failed",
             )
@@ -327,6 +409,7 @@ def run_pipeline():
         # ==================================================
 
         try:
+
             ai_result = process_article(
                 raw_content,
                 source_title,
@@ -334,6 +417,7 @@ def run_pipeline():
             )
 
         except Exception as e:
+
             print(
                 f"⚠️ حدث خطأ أثناء معالجة Gemini: {e}"
             )
@@ -344,7 +428,7 @@ def run_pipeline():
             )
 
             mark_db_record(
-                source_link,
+                resolved_url,
                 source_title,
                 "publish_failed",
             )
@@ -354,10 +438,11 @@ def run_pipeline():
             continue
 
         # ==================================================
-        # نفاد جميع حصص Gemini
+        # نفاد حصص Gemini
         # ==================================================
 
         if is_gemini_quota_exhausted():
+
             print(
                 "⛔ لم يعد هناك نموذج Gemini متاح "
                 "للمعالجة في هذه الدورة."
@@ -378,10 +463,11 @@ def run_pipeline():
         time.sleep(5)
 
         # ==================================================
-        # فشل Gemini عادي
+        # فشل Gemini
         # ==================================================
 
         if not ai_result:
+
             print(
                 "⚠️ فشلت معالجة المقال بواسطة الذكاء الاصطناعي."
             )
@@ -392,7 +478,7 @@ def run_pipeline():
             )
 
             mark_db_record(
-                source_link,
+                resolved_url,
                 source_title,
                 "publish_failed",
             )
@@ -424,6 +510,7 @@ def run_pipeline():
             not rewritten_title
             or not rewritten_content
         ):
+
             print(
                 "⚠️ نتيجة الذكاء الاصطناعي ناقصة."
             )
@@ -434,7 +521,7 @@ def run_pipeline():
             )
 
             mark_db_record(
-                source_link,
+                resolved_url,
                 source_title,
                 "publish_failed",
             )
@@ -454,6 +541,7 @@ def run_pipeline():
         # ==================================================
 
         try:
+
             site_url = publish_post(
                 title=rewritten_title,
                 content=rewritten_content,
@@ -462,6 +550,7 @@ def run_pipeline():
             )
 
         except Exception as e:
+
             print(
                 f"❌ حدث خطأ أثناء النشر في WordPress: {e}"
             )
@@ -472,7 +561,7 @@ def run_pipeline():
             )
 
             mark_db_record(
-                source_link,
+                resolved_url,
                 source_title,
                 "publish_failed",
             )
@@ -488,12 +577,13 @@ def run_pipeline():
         # ==================================================
 
         if site_url:
+
             print(
                 f"✅ تم النشر بنجاح: {site_url}"
             )
 
             mark_db_record(
-                source_link,
+                resolved_url,
                 source_title,
                 "published",
             )
@@ -507,6 +597,7 @@ def run_pipeline():
             )
 
         else:
+
             print(
                 "❌ فشل النشر في WordPress."
             )
@@ -517,7 +608,7 @@ def run_pipeline():
             )
 
             mark_db_record(
-                source_link,
+                resolved_url,
                 source_title,
                 "publish_failed",
             )
@@ -574,16 +665,26 @@ def run_pipeline():
     )
 
     if quota_exhausted:
+
         print(
             "⏸️ توقفت الدورة بسبب عدم توفر "
             "حصة Gemini لأي من النماذج المتاحة."
         )
 
+    # ======================================================
+    # تقرير Telegram
+    #
+    # تم تصحيح الخطأ القديم:
+    # send_cycle_report() يستقبل 3 معاملات فقط.
+    #
+    # لا يتم تمرير filtered_title_items،
+    # وبالتالي لن تظهر عناوين الأخبار المستبعدة.
+    # ======================================================
+
     send_cycle_report(
         published_items,
         checked_count,
         skipped_count,
-        filtered_title_items,
     )
 
     print(
@@ -591,11 +692,18 @@ def run_pipeline():
     )
 
 
+# ==========================================================
+# التشغيل
+# ==========================================================
+
 if __name__ == "__main__":
+
     try:
+
         run_pipeline()
 
     except Exception as e:
+
         error_msg = (
             f"حدث خطأ غير متوقع أثناء تنفيذ الدورة: {e}"
         )
