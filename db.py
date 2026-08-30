@@ -4,17 +4,15 @@ db.py
 قاعدة بيانات SQLite لمنع تكرار الأخبار.
 
 يتم منع التكرار عبر:
-- الرابط بعد تنظيف بسيط.
+- الرابط بعد تنظيفه.
+- معرّف خبر كووورة الموجود داخل الرابط (bl...).
 - العنوان بعد تنظيف المسافات واسم المصدر فقط.
 - حجز الخبر بحالة processing قبل بدء معالجته،
   لمنع تشغيلين متزامنين من معالجة الخبر نفسه.
 
-لا يتم إجراء تطبيع قوي للعناوين حتى لا يتم اعتبار
-أخبار مختلفة متشابهة على أنها خبر واحد.
-
 الأخبار التي تفشل في المعالجة بحالة publish_failed
 يمكن إعادة محاولتها لمدة أقصاها 6 ساعات من وقت أول فشل.
-بعد مرور 6 ساعات يتم تجاهل الخبر نهائيًا.
+بعد مرور 6 ساعات يتم السماح بمحاولة جديدة.
 """
 
 import hashlib
@@ -33,50 +31,76 @@ DB_PATH = os.path.join(
 FAILED_RETRY_HOURS = 6
 
 
+# =========================================================
+# تهيئة قاعدة البيانات
+# =========================================================
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS processed_news (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url_hash TEXT UNIQUE NOT NULL,
-            original_url TEXT,
-            title TEXT,
-            title_hash TEXT,
-            wp_post_id INTEGER,
-            status TEXT,
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_url_hash
-        ON processed_news(url_hash)
-    """)
 
     try:
-        cur.execute(
-            "ALTER TABLE processed_news ADD COLUMN title_hash TEXT"
-        )
-    except sqlite3.OperationalError:
-        pass
+        cur = conn.cursor()
 
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_title_hash
-        ON processed_news(title_hash)
-    """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS processed_news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url_hash TEXT UNIQUE NOT NULL,
+                original_url TEXT,
+                title TEXT,
+                title_hash TEXT,
+                wp_post_id INTEGER,
+                status TEXT,
+                created_at TEXT
+            )
+        """)
 
-    conn.commit()
-    conn.close()
+        # -------------------------------------------------
+        # ترقية قاعدة البيانات القديمة بإضافة kooora_id
+        # -------------------------------------------------
 
+        try:
+            cur.execute(
+                "ALTER TABLE processed_news ADD COLUMN kooora_id TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # -------------------------------------------------
+        # الفهارس
+        # -------------------------------------------------
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_url_hash
+            ON processed_news(url_hash)
+        """)
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_title_hash
+            ON processed_news(title_hash)
+        """)
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_kooora_id
+            ON processed_news(kooora_id)
+        """)
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# تنظيف الرابط
+# =========================================================
 
 def _normalize_url(url: str) -> str:
     if not url:
         return ""
 
     try:
-        parts = urlsplit(url.strip())
+        parts = urlsplit(str(url).strip())
+
         host = (parts.hostname or "").lower()
 
         if host.startswith("www."):
@@ -95,8 +119,47 @@ def _normalize_url(url: str) -> str:
         )
 
     except Exception:
-        return url.strip().rstrip("/")
+        return str(url).strip().rstrip("/")
 
+
+# =========================================================
+# استخراج معرّف خبر كووورة
+# =========================================================
+
+def _extract_kooora_id(url: str) -> str:
+    """
+    يستخرج المعرّف الفريد لخبر كووورة.
+
+    أمثلة:
+        .../bltc03f5c344f659766
+        .../blt16a7be99bdb47db9
+
+    المعرّف يعتبر أقوى من اختلافات الرابط،
+    لأن كووورة قد تعرض الرابط بصيغ مختلفة لنفس الخبر.
+    """
+
+    if not url:
+        return ""
+
+    try:
+        match = re.search(
+            r"/(bl[a-zA-Z0-9]+)(?:[/?#]|$)",
+            str(url),
+            re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).lower()
+
+    except Exception:
+        pass
+
+    return ""
+
+
+# =========================================================
+# تنظيف العنوان
+# =========================================================
 
 def _normalize_title(title: str) -> str:
     if not title:
@@ -122,6 +185,10 @@ def _normalize_title(title: str) -> str:
     return title.lower()
 
 
+# =========================================================
+# Hash
+# =========================================================
+
 def _hash_url(url: str) -> str:
     return hashlib.sha256(
         _normalize_url(url).encode("utf-8")
@@ -134,14 +201,11 @@ def _hash_title(title: str) -> str:
     ).hexdigest()
 
 
+# =========================================================
+# انتهاء فترة إعادة محاولة الفشل
+# =========================================================
+
 def _failed_retry_expired(created_at: str) -> bool:
-    """
-    التحقق من انتهاء مدة إعادة محاولة الخبر الفاشل.
-
-    إذا مر أكثر من 6 ساعات على وقت أول فشل،
-    يتم تجاهل الخبر نهائيًا.
-    """
-
     if not created_at:
         return False
 
@@ -166,111 +230,129 @@ def _failed_retry_expired(created_at: str) -> bool:
         return False
 
 
+# =========================================================
+# تحديد هل السجل يعتبر معالجًا
+# =========================================================
+
 def _is_matching_record_processed(row) -> bool:
-    """
-    تحديد ما إذا كان سجل الخبر يجب اعتباره مكتملًا.
-
-    الحالات:
-    - أي حالة ليست publish_failed = الخبر تمت معالجته بالفعل.
-    - publish_failed خلال آخر 6 ساعات = يسمح بإعادة المحاولة.
-    - publish_failed بعد 6 ساعات = يتم تجاهله نهائيًا.
-    """
-
     if not row:
         return False
 
     status, created_at = row
 
+    # كل الحالات غير publish_failed تعتبر مكتملة
+    # أو محجوزة حاليًا.
     if status != "publish_failed":
         return True
 
+    # الفشل القديم انتهت مدة إعادة محاولته.
     if _failed_retry_expired(created_at):
         return True
 
+    # الفشل الحديث يمكن إعادة محاولته.
     return False
 
+
+# =========================================================
+# فحص الخبر
+# =========================================================
 
 def is_processed(
     url: str,
     title: str = "",
 ) -> bool:
-    """
-    التحقق من وجود الخبر سابقًا.
-
-    الأخبار التي فشلت في المعالجة:
-    - يعاد فحصها ومحاولة معالجتها خلال أول 6 ساعات.
-    - بعد مرور 6 ساعات على أول فشل يتم تجاهلها نهائيًا.
-
-    الخبر الذي يحمل حالة processing يعتبر محجوزًا
-    ويمنع تشغيلًا آخر من معالجته في الوقت نفسه.
-    """
 
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT status, created_at
-        FROM processed_news
-        WHERE url_hash = ?
-        LIMIT 1
-        """,
-        (_hash_url(url),),
-    )
+    try:
+        cur = conn.cursor()
 
-    row = cur.fetchone()
+        normalized_url = _normalize_url(url)
+        url_hash = _hash_url(normalized_url)
+        kooora_id = _extract_kooora_id(normalized_url)
+        title_hash = _hash_title(title)
 
-    if row and _is_matching_record_processed(row):
-        conn.close()
-        return True
+        # -------------------------------------------------
+        # 1. فحص الرابط
+        # -------------------------------------------------
 
-    if title:
         cur.execute(
             """
             SELECT status, created_at
             FROM processed_news
-            WHERE title_hash = ?
+            WHERE url_hash = ?
             LIMIT 1
             """,
-            (_hash_title(title),),
+            (url_hash,),
         )
 
         row = cur.fetchone()
 
         if row and _is_matching_record_processed(row):
-            conn.close()
             return True
 
-    conn.close()
-    return False
+        # -------------------------------------------------
+        # 2. فحص معرّف كووورة
+        #
+        # هذه هي طبقة الحماية الأساسية ضد اختلاف
+        # صيغ روابط نفس الخبر.
+        # -------------------------------------------------
 
+        if kooora_id:
+            cur.execute(
+                """
+                SELECT status, created_at
+                FROM processed_news
+                WHERE kooora_id = ?
+                LIMIT 1
+                """,
+                (kooora_id,),
+            )
+
+            row = cur.fetchone()
+
+            if row and _is_matching_record_processed(row):
+                return True
+
+        # -------------------------------------------------
+        # 3. فحص العنوان
+        # -------------------------------------------------
+
+        if title:
+            cur.execute(
+                """
+                SELECT status, created_at
+                FROM processed_news
+                WHERE title_hash = ?
+                LIMIT 1
+                """,
+                (title_hash,),
+            )
+
+            row = cur.fetchone()
+
+            if row and _is_matching_record_processed(row):
+                return True
+
+        return False
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# حجز الخبر
+# =========================================================
 
 def claim_news(
     url: str,
     title: str = "",
 ) -> bool:
-    """
-    حجز الخبر للمعالجة بشكل ذري.
-
-    الهدف:
-    منع تشغيلين متزامنين من الوصول إلى نفس الخبر
-    ثم نشره مرتين.
-
-    النتيجة:
-    - True  = تم حجز الخبر ويمكن بدء معالجته.
-    - False = الخبر موجود أو محجوز مسبقًا.
-
-    publish_failed:
-    إذا كان الخبر فاشلًا وما زال ضمن فترة إعادة المحاولة
-    يسمح له بحجز جديد.
-
-    بعد مرور 6 ساعات على أول فشل يسمح بالحجز مجددًا
-    مع تحديث حالة الخبر إلى processing.
-    """
 
     normalized_url = _normalize_url(url)
     url_hash = _hash_url(normalized_url)
     title_hash = _hash_title(title)
+    kooora_id = _extract_kooora_id(normalized_url)
     created_at = datetime.now(timezone.utc).isoformat()
 
     conn = sqlite3.connect(
@@ -281,17 +363,12 @@ def claim_news(
     try:
         cur = conn.cursor()
 
-        # --------------------------------------------------
-        # بدء معاملة كتابة مباشرة.
-        #
-        # هذا يجعل عملية:
-        # SELECT -> INSERT/UPDATE
-        # عملية ذرية بالنسبة للتشغيلات المتزامنة.
-        # --------------------------------------------------
+        # قفل الكتابة حتى لا يقوم تشغيلان بحجز الخبر نفسه.
+        cur.execute("BEGIN IMMEDIATE")
 
-        cur.execute(
-            "BEGIN IMMEDIATE"
-        )
+        # -------------------------------------------------
+        # 1. البحث بالرابط
+        # -------------------------------------------------
 
         cur.execute(
             """
@@ -308,23 +385,17 @@ def claim_news(
 
         existing = cur.fetchone()
 
-        # --------------------------------------------------
-        # يوجد سجل بنفس الرابط.
-        # --------------------------------------------------
-
         if existing:
             existing_id = existing[0]
             existing_status = existing[1]
             existing_created_at = existing[2]
 
-            # الخبر منشور أو محجوز أو تم تجاوزه.
+            # الخبر منشور أو processing أو متجاوز.
             if existing_status != "publish_failed":
                 conn.rollback()
                 return False
 
-            # فشل حديث: يسمح بإعادة المحاولة.
-            # لكن يجب تحويله إلى processing داخل
-            # نفس المعاملة قبل السماح بالمعالجة.
+            # فشل حديث → إعادة المحاولة.
             if not _failed_retry_expired(
                 existing_created_at
             ):
@@ -335,6 +406,7 @@ def claim_news(
                         original_url = ?,
                         title = ?,
                         title_hash = ?,
+                        kooora_id = ?,
                         status = ?,
                         created_at = ?
                     WHERE id = ?
@@ -343,6 +415,7 @@ def claim_news(
                         normalized_url,
                         title,
                         title_hash,
+                        kooora_id,
                         "processing",
                         existing_created_at,
                         existing_id,
@@ -352,12 +425,7 @@ def claim_news(
                 conn.commit()
                 return True
 
-            # --------------------------------------------------
-            # انتهت فترة الفشل السابقة.
-            #
-            # نسمح بمحاولة جديدة ونبدأ فترة processing جديدة.
-            # --------------------------------------------------
-
+            # فشل قديم → دورة جديدة.
             cur.execute(
                 """
                 UPDATE processed_news
@@ -365,6 +433,7 @@ def claim_news(
                     original_url = ?,
                     title = ?,
                     title_hash = ?,
+                    kooora_id = ?,
                     status = ?,
                     created_at = ?
                 WHERE id = ?
@@ -373,6 +442,7 @@ def claim_news(
                     normalized_url,
                     title,
                     title_hash,
+                    kooora_id,
                     "processing",
                     created_at,
                     existing_id,
@@ -382,11 +452,99 @@ def claim_news(
             conn.commit()
             return True
 
-        # --------------------------------------------------
-        # لا يوجد سجل بالرابط.
-        #
-        # قبل الإدخال نفحص العنوان أيضًا.
-        # --------------------------------------------------
+        # -------------------------------------------------
+        # 2. البحث بمعرّف كووورة
+        # -------------------------------------------------
+
+        if kooora_id:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    status,
+                    created_at
+                FROM processed_news
+                WHERE kooora_id = ?
+                LIMIT 1
+                """,
+                (kooora_id,),
+            )
+
+            kooora_existing = cur.fetchone()
+
+            if kooora_existing:
+                existing_id = kooora_existing[0]
+                existing_status = kooora_existing[1]
+                existing_created_at = kooora_existing[2]
+
+                # -------------------------------------------------
+                # نفس خبر كووورة موجود بالفعل.
+                # -------------------------------------------------
+
+                if existing_status != "publish_failed":
+                    conn.rollback()
+                    return False
+
+                # فشل حديث.
+                if not _failed_retry_expired(
+                    existing_created_at
+                ):
+                    cur.execute(
+                        """
+                        UPDATE processed_news
+                        SET
+                            original_url = ?,
+                            title = ?,
+                            title_hash = ?,
+                            kooora_id = ?,
+                            status = ?,
+                            created_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            normalized_url,
+                            title,
+                            title_hash,
+                            kooora_id,
+                            "processing",
+                            existing_created_at,
+                            existing_id,
+                        ),
+                    )
+
+                    conn.commit()
+                    return True
+
+                # فشل قديم.
+                cur.execute(
+                    """
+                    UPDATE processed_news
+                    SET
+                        original_url = ?,
+                        title = ?,
+                        title_hash = ?,
+                        kooora_id = ?,
+                        status = ?,
+                        created_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized_url,
+                        title,
+                        title_hash,
+                        kooora_id,
+                        "processing",
+                        created_at,
+                        existing_id,
+                    ),
+                )
+
+                conn.commit()
+                return True
+
+        # -------------------------------------------------
+        # 3. البحث بالعنوان
+        # -------------------------------------------------
 
         if title:
             cur.execute(
@@ -423,6 +581,7 @@ def claim_news(
                             original_url = ?,
                             title = ?,
                             title_hash = ?,
+                            kooora_id = ?,
                             status = ?,
                             created_at = ?
                         WHERE id = ?
@@ -431,6 +590,7 @@ def claim_news(
                             normalized_url,
                             title,
                             title_hash,
+                            kooora_id,
                             "processing",
                             existing_created_at,
                             existing_id,
@@ -447,6 +607,7 @@ def claim_news(
                         original_url = ?,
                         title = ?,
                         title_hash = ?,
+                        kooora_id = ?,
                         status = ?,
                         created_at = ?
                     WHERE id = ?
@@ -455,6 +616,7 @@ def claim_news(
                         normalized_url,
                         title,
                         title_hash,
+                        kooora_id,
                         "processing",
                         created_at,
                         existing_id,
@@ -464,9 +626,9 @@ def claim_news(
                 conn.commit()
                 return True
 
-        # --------------------------------------------------
-        # الخبر جديد تمامًا.
-        # --------------------------------------------------
+        # -------------------------------------------------
+        # 4. خبر جديد
+        # -------------------------------------------------
 
         cur.execute(
             """
@@ -475,17 +637,19 @@ def claim_news(
                 original_url,
                 title,
                 title_hash,
+                kooora_id,
                 wp_post_id,
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 url_hash,
                 normalized_url,
                 title,
                 title_hash,
+                kooora_id,
                 None,
                 "processing",
                 created_at,
@@ -507,30 +671,219 @@ def claim_news(
         conn.close()
 
 
+# =========================================================
+# تحديث الرابط النهائي بعد استخراج المقال
+# =========================================================
+
+def update_claimed_url(
+    original_url: str,
+    final_url: str,
+    title: str = "",
+) -> bool:
+    """
+    تحديث سجل الخبر المحجوز بالرابط النهائي.
+
+    الهدف:
+    إذا كان رابط القائمة مختلفًا عن الرابط النهائي الذي
+    تم الوصول إليه، يتم تسجيل الهوية النهائية للخبر.
+
+    ترجع:
+        True  = تم تحديث السجل.
+        False = يوجد خبر آخر مسجل بنفس الهوية النهائية.
+    """
+
+    original_normalized = _normalize_url(
+        original_url
+    )
+
+    final_normalized = _normalize_url(
+        final_url
+    )
+
+    if not final_normalized:
+        return True
+
+    original_hash = _hash_url(
+        original_normalized
+    )
+
+    final_hash = _hash_url(
+        final_normalized
+    )
+
+    kooora_id = _extract_kooora_id(
+        final_normalized
+    )
+
+    title_hash = _hash_title(title)
+
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+    )
+
+    try:
+        cur = conn.cursor()
+
+        cur.execute("BEGIN IMMEDIATE")
+
+        # -------------------------------------------------
+        # العثور على السجل الذي حجزناه.
+        # -------------------------------------------------
+
+        cur.execute(
+            """
+            SELECT id
+            FROM processed_news
+            WHERE url_hash = ?
+            AND status = 'processing'
+            LIMIT 1
+            """,
+            (original_hash,),
+        )
+
+        current = cur.fetchone()
+
+        if not current:
+            conn.rollback()
+            return False
+
+        current_id = current[0]
+
+        # -------------------------------------------------
+        # إذا كان الرابط النهائي مختلفًا، تأكد أنه ليس
+        # مسجلًا مسبقًا في سجل آخر.
+        # -------------------------------------------------
+
+        if final_hash != original_hash:
+            cur.execute(
+                """
+                SELECT id, status
+                FROM processed_news
+                WHERE url_hash = ?
+                AND id != ?
+                LIMIT 1
+                """,
+                (
+                    final_hash,
+                    current_id,
+                ),
+            )
+
+            duplicate_url = cur.fetchone()
+
+            if duplicate_url:
+                conn.rollback()
+                return False
+
+        # -------------------------------------------------
+        # فحص معرّف كووورة.
+        # -------------------------------------------------
+
+        if kooora_id:
+            cur.execute(
+                """
+                SELECT id, status
+                FROM processed_news
+                WHERE kooora_id = ?
+                AND id != ?
+                LIMIT 1
+                """,
+                (
+                    kooora_id,
+                    current_id,
+                ),
+            )
+
+            duplicate_kooora = cur.fetchone()
+
+            if duplicate_kooora:
+                conn.rollback()
+                return False
+
+        # -------------------------------------------------
+        # تحديث السجل.
+        #
+        # لا نغير created_at لأن وقت الحجز الأصلي مهم
+        # لفترة إعادة المحاولة.
+        # -------------------------------------------------
+
+        cur.execute(
+            """
+            UPDATE processed_news
+            SET
+                url_hash = ?,
+                original_url = ?,
+                title = ?,
+                title_hash = ?,
+                kooora_id = ?
+            WHERE id = ?
+            """,
+            (
+                final_hash,
+                final_normalized,
+                title,
+                title_hash,
+                kooora_id,
+                current_id,
+            ),
+        )
+
+        conn.commit()
+        return True
+
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# العناوين المنشورة مؤخرًا
+# =========================================================
+
 def get_recent_titles(
     limit: int = 40,
 ) -> list[str]:
+
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT title
-        FROM processed_news
-        WHERE title IS NOT NULL
-        AND title != ''
-        AND status LIKE 'published%'
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
+    try:
+        cur = conn.cursor()
 
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute(
+            """
+            SELECT title
+            FROM processed_news
+            WHERE title IS NOT NULL
+            AND title != ''
+            AND status LIKE 'published%'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
 
-    return [row[0] for row in rows]
+        rows = cur.fetchall()
 
+        return [
+            row[0]
+            for row in rows
+        ]
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# تسجيل النتيجة النهائية
+# =========================================================
 
 def mark_processed(
     url: str,
@@ -543,17 +896,25 @@ def mark_processed(
         timeout=30,
     )
 
-    cur = conn.cursor()
-
-    normalized_url = _normalize_url(url)
-    url_hash = _hash_url(normalized_url)
-    title_hash = _hash_title(title)
-    created_at = datetime.now(timezone.utc).isoformat()
-
     try:
+        cur = conn.cursor()
+
+        normalized_url = _normalize_url(url)
+        url_hash = _hash_url(normalized_url)
+        title_hash = _hash_title(title)
+        kooora_id = _extract_kooora_id(
+            normalized_url
+        )
+        created_at = datetime.now(
+            timezone.utc
+        ).isoformat()
+
         cur.execute(
             """
-            SELECT id, status, created_at
+            SELECT
+                id,
+                status,
+                created_at
             FROM processed_news
             WHERE url_hash = ?
             LIMIT 1
@@ -568,8 +929,7 @@ def mark_processed(
             existing_status = existing[1]
             existing_created_at = existing[2]
 
-            # عند إعادة تسجيل نفس الخبر كـ publish_failed،
-            # نحافظ على وقت أول فشل بدل تجديد مدة الـ6 ساعات.
+            # عند استمرار الفشل، نحافظ على وقت أول فشل.
             if (
                 status == "publish_failed"
                 and existing_status == "publish_failed"
@@ -584,6 +944,7 @@ def mark_processed(
                     original_url = ?,
                     title = ?,
                     title_hash = ?,
+                    kooora_id = ?,
                     wp_post_id = ?,
                     status = ?,
                     created_at = ?
@@ -593,6 +954,7 @@ def mark_processed(
                     normalized_url,
                     title,
                     title_hash,
+                    kooora_id,
                     wp_post_id,
                     status,
                     created_at,
@@ -608,17 +970,19 @@ def mark_processed(
                     original_url,
                     title,
                     title_hash,
+                    kooora_id,
                     wp_post_id,
                     status,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     url_hash,
                     normalized_url,
                     title,
                     title_hash,
+                    kooora_id,
                     wp_post_id,
                     status,
                     created_at,
@@ -628,15 +992,23 @@ def mark_processed(
         conn.commit()
 
     except sqlite3.IntegrityError:
-        pass
+        conn.rollback()
 
     finally:
         conn.close()
 
 
+# =========================================================
+# أسماء توافقية قديمة
+# =========================================================
+
 mark_as_processed = mark_processed
 add_processed_news = mark_processed
 save_article = mark_processed
 
+
+# =========================================================
+# تشغيل التهيئة
+# =========================================================
 
 init_db()
