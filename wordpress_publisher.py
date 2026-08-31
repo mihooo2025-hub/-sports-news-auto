@@ -6,6 +6,8 @@ wordpress_publisher.py
 - Resolves category names to Category IDs via WordPress REST API.
   Never creates new categories — if no match is found, the category is omitted.
 - Creates published post directly with featured image and resolved categories.
+- Handles Cloudflare/WAF HTTP 403 responses without treating them as
+  invalid WordPress credentials.
 """
 
 import time
@@ -25,6 +27,9 @@ DEFAULT_HEADERS = {
         "Chrome/131.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
 
 HEADERS_GET = DEFAULT_HEADERS.copy()
@@ -45,6 +50,7 @@ HEADERS_IMAGE = {
         "image/avif,image/webp,image/apng,image/svg+xml,"
         "image/*,*/*;q=0.8"
     ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 _category_cache = {}
@@ -73,6 +79,17 @@ RETRY_DELAYS = [
 
 
 # =========================================================
+# إنشاء Session
+# =========================================================
+
+_session = requests.Session()
+
+_session.headers.update(
+    DEFAULT_HEADERS
+)
+
+
+# =========================================================
 # طلبات WordPress مع إعادة المحاولة
 # =========================================================
 
@@ -88,9 +105,17 @@ def _wp_request(
     """
     تنفيذ طلب إلى WordPress REST API مع إعادة المحاولة
     عند الأخطاء المؤقتة أو مشاكل الاتصال.
+
+    HTTP 403 الناتج عن Cloudflare/WAF لا يتم اعتباره
+    خطأ بيانات اعتماد بحد ذاته.
     """
 
     last_exception = None
+
+    request_headers = DEFAULT_HEADERS.copy()
+
+    if headers:
+        request_headers.update(headers)
 
     for attempt in range(
         1,
@@ -98,12 +123,13 @@ def _wp_request(
     ):
 
         try:
-            resp = requests.request(
+            resp = _session.request(
                 method,
                 url,
                 auth=auth,
-                headers=headers,
+                headers=request_headers,
                 timeout=timeout,
+                allow_redirects=True,
                 **kwargs,
             )
 
@@ -155,6 +181,19 @@ def _wp_request(
                         f"{resp.status_code} "
                         f"(المحاولة {attempt}/{WP_MAX_RETRIES})."
                     )
+
+                    # -------------------------------------------------
+                    # توضيح سبب 403 إذا كان Cloudflare/WAF
+                    # -------------------------------------------------
+
+                    if (
+                        resp.status_code == 403
+                        and _is_cloudflare_block(resp)
+                    ):
+                        print(
+                            "🛡️ الطلب مرفوض بواسطة Cloudflare/WAF "
+                            "وليس بسبب خطأ واضح في بيانات الدخول."
+                        )
 
                     print(
                         f"🔄 إعادة المحاولة بعد "
@@ -215,6 +254,62 @@ def _wp_request(
 
 
 # =========================================================
+# اكتشاف Cloudflare / WAF
+# =========================================================
+
+def _is_cloudflare_block(resp) -> bool:
+
+    if resp is None:
+        return False
+
+    server = (
+        resp.headers.get("Server", "")
+        or ""
+    ).lower()
+
+    cf_ray = (
+        resp.headers.get("CF-Ray")
+        or ""
+    )
+
+    cf_mitigated = (
+        resp.headers.get("CF-Mitigated")
+        or ""
+    )
+
+    cf_error_type = (
+        resp.headers.get("cf-error-type")
+        or ""
+    )
+
+    text = (
+        resp.text[:5000]
+        if hasattr(resp, "text")
+        else ""
+    ).lower()
+
+    indicators = [
+        "bot verification",
+        "cloudflare",
+        "cf-ray",
+        "recaptcha",
+        "challenge-platform",
+        "managed challenge",
+    ]
+
+    return (
+        "cloudflare" in server
+        or bool(cf_ray)
+        or bool(cf_mitigated)
+        or bool(cf_error_type)
+        or any(
+            indicator in text
+            for indicator in indicators
+        )
+    )
+
+
+# =========================================================
 # بيانات WordPress
 # =========================================================
 
@@ -260,6 +355,14 @@ def _print_wp_error(
     resp,
     action="WordPress",
 ):
+
+    if resp is None:
+
+        print(
+            f"❌ {action} failed — No response"
+        )
+
+        return
 
     print(
         f"❌ {action} failed — HTTP "
@@ -311,39 +414,68 @@ def _print_wp_error(
             f"ℹ️ CF-Error-Origin: {cf_error_origin}"
         )
 
+    # =====================================================
+    # Cloudflare / WAF 403
+    # =====================================================
+
+    if (
+        resp.status_code == 403
+        and _is_cloudflare_block(resp)
+    ):
+
+        print(
+            "🚫 تم رفض طلب WordPress REST API "
+            "بواسطة طبقة حماية أمام الموقع "
+            "(Cloudflare/WAF)."
+        )
+
+        print(
+            "⚠️ هذا ليس دليلًا على أن Application Password "
+            "خاطئة."
+        )
+
+        print(
+            "ℹ️ يجب السماح بطلبات REST API من GitHub Actions "
+            "في إعدادات الحماية."
+        )
+
+        print(
+            "ℹ️ تمت إعادة المحاولة تلقائيًا قبل الوصول "
+            "إلى هذه النتيجة."
+        )
+
+        print(
+            f"Response: {resp.text[:500]}"
+        )
+
+        return
+
+    # =====================================================
+    # 403 عادي
+    # =====================================================
+
     if resp.status_code == 403:
 
-        if (
-            "Bot Verification" in resp.text
-            or "Cloudflare" in resp.text
-            or "cf-" in resp.text.lower()
-            or cf_ray
-            or cf_mitigated
-        ):
+        print(
+            "⚠️ WordPress returned 403 Forbidden."
+        )
 
-            print(
-                "🚫 تم رفض طلب WordPress REST API "
-                "بواسطة طبقة حماية أمام الموقع "
-                "(مثل Cloudflare/WAF)."
-            )
+        print(
+            "ℹ️ قد تكون المشكلة صلاحيات المستخدم "
+            "أو إضافة أمنية."
+        )
 
-            print(
-                "⚠️ قد يكون الرفض مؤقتًا."
-            )
+        print(
+            f"Response: {resp.text[:500]}"
+        )
 
-            print(
-                "➡️ تمت إعادة المحاولة تلقائيًا."
-            )
+        return
 
-        else:
+    # =====================================================
+    # 525
+    # =====================================================
 
-            print(
-                "⚠️ WordPress returned 403 Forbidden. "
-                "قد تكون المشكلة صلاحيات المستخدم "
-                "أو إضافة أمنية."
-            )
-
-    elif resp.status_code == 525:
+    if resp.status_code == 525:
 
         print(
             "🚫 Cloudflare أعاد HTTP 525."
@@ -355,24 +487,18 @@ def _print_wp_error(
         )
 
         print(
-            "ℹ️ لن يتم نشر المقال بدون الصورة "
-            "إذا كان الخطأ متعلقًا برفع الصورة."
-        )
-
-    else:
-
-        print(
             f"Response: {resp.text[:500]}"
         )
 
-    if resp.status_code in {
-        403,
-        525,
-    }:
+        return
 
-        print(
-            f"Response: {resp.text[:500]}"
-        )
+    # =====================================================
+    # بقية الأخطاء
+    # =====================================================
+
+    print(
+        f"Response: {resp.text[:500]}"
+    )
 
 
 # =========================================================
@@ -383,10 +509,11 @@ def test_authentication() -> bool:
     """
     التحقق من إمكانية استخدام WordPress REST API.
 
-    أخطاء 403/429/5xx ومشاكل الاتصال المؤقتة
-    لا تؤدي مباشرة إلى إيقاف الدورة.
-
     401 فقط تعتبر مشكلة مصادقة واضحة.
+
+    403 الناتجة عن Cloudflare/WAF لا تعتبر
+    بيانات اعتماد خاطئة، ويُسمح للدورة بالاستمرار
+    لمحاولة عمليات WordPress الفعلية.
     """
 
     site_url, auth, username = (
@@ -396,7 +523,7 @@ def test_authentication() -> bool:
     headers = HEADERS_GET.copy()
 
     # =====================================================
-    # 1) اختبار REST API الأساسي
+    # اختبار REST API الأساسي
     # =====================================================
 
     api_check = None
@@ -460,7 +587,7 @@ def test_authentication() -> bool:
         )
 
     # =====================================================
-    # 2) الاختبار الحقيقي للمصادقة
+    # الاختبار الحقيقي للمصادقة
     # =====================================================
 
     try:
@@ -704,9 +831,6 @@ def resolve_category_ids(
     category_names: list,
 ) -> list:
 
-    # Uncategorized يجب أن يكون موجودًا دائمًا،
-    # مع الاحتفاظ بباقي التصنيفات التي يحددها النظام.
-
     category_names = (
         category_names or []
     )
@@ -759,7 +883,7 @@ def upload_featured_image(
         # تنزيل الصورة من المصدر
         # -------------------------------------------------
 
-        img_resp = requests.get(
+        img_resp = _session.get(
             image_url,
             headers=HEADERS_IMAGE,
             timeout=20,
@@ -805,14 +929,12 @@ def upload_featured_image(
                 f'attachment; filename="{filename}"',
             "Content-Type":
                 content_type,
+            "Accept":
+                "application/json",
         })
 
         # -------------------------------------------------
         # رفع الصورة
-        #
-        # مهم:
-        # إذا فشل الرفع فلن يتم السماح بنشر المقال
-        # بدون featured image.
         # -------------------------------------------------
 
         upload_resp = _wp_request(
@@ -921,11 +1043,6 @@ def create_draft_post(
         image_url,
         alt_text=main_title,
     )
-
-    # -----------------------------------------------------
-    # إذا كانت هناك صورة مطلوبة ولم يتم رفعها،
-    # لا تنشئ المقال.
-    # -----------------------------------------------------
 
     if image_url and not media_id:
 
@@ -1049,10 +1166,8 @@ def publish_post(
     )
 
     # -----------------------------------------------------
-    # التغيير الأساسي:
-    #
     # إذا كانت هناك صورة من المصدر وفشل رفعها،
-    # لا يتم نشر المقال بدونها.
+    # لا يتم نشر المقال.
     # -----------------------------------------------------
 
     if image_url and not media_id:
@@ -1080,11 +1195,6 @@ def publish_post(
         "status": "publish",
         "categories": category_ids,
     }
-
-    # -----------------------------------------------------
-    # لا يتم إرسال featured_media إلا بعد التأكد
-    # من نجاح رفع الصورة والحصول على Media ID.
-    # -----------------------------------------------------
 
     if media_id:
 
