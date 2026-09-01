@@ -101,6 +101,11 @@ def send_cycle_report(
         مهم:
         يتم استخدام هذا المتغير لحساب العدد فقط.
         لا يتم إرسال عناوين الأخبار المستبعدة إلى Telegram.
+
+    ملاحظة:
+        إذا تجاوز التقرير الحد الأقصى المسموح به لرسالة تلجرام واحدة
+        (تقريبًا 4096 حرفًا)، يتم تقسيمه تلقائيًا إلى عدة رسائل متتالية
+        بدل إلغاء الإرسال بالكامل.
     """
 
     if not _is_configured():
@@ -136,14 +141,8 @@ def send_cycle_report(
             f"لم يُنشر أي خبر جديد في هذه الدورة."
         )
 
-        if len(message) > MAX_MESSAGE_LENGTH:
-
-            print(
-                "⚠️ تقرير Telegram تجاوز الحد المسموح به."
-            )
-
-            return
-
+        # هذه الرسالة قصيرة دائمًا ولن تتجاوز الحد، لكن نتركها
+        # محمية بنفس منطق الإرسال العادي.
         _send_message(
             message
         )
@@ -163,11 +162,11 @@ def send_cycle_report(
         f"{filtered_title_count} خبر\n"
     )
 
-    lines = []
+    # =========================================================
+    # بناء نص كل خبر منشور على حدة
+    # =========================================================
 
-    # =========================================================
-    # إضافة الأخبار المنشورة فقط
-    # =========================================================
+    item_texts = []
 
     for i, item in enumerate(
         published_items,
@@ -236,42 +235,90 @@ def send_cycle_report(
                 "غير متوفر"
             )
 
-        lines.append(
+        item_texts.append(
             f"\n{i}. <b>{title}</b>\n"
             f"🔗 المصدر الأصلي: {source_link}\n"
             f"🌐 الخبر الجديد: {site_link}"
         )
 
     # =========================================================
-    # رسالة واحدة فقط
+    # تجميع النصوص في رسائل بحيث لا تتجاوز أي رسالة الحد الأقصى.
+    # الرأس (header) يوضع فقط في أول رسالة.
+    # إذا كان هناك أكثر من رسالة، تُضاف علامة ترقيم (جزء س/ص)
+    # في بداية كل رسالة تالية للرأس.
     # =========================================================
 
-    message = (
-        header
-        + "".join(lines)
-    )
+    messages = []
 
-    # Telegram يسمح بحد أقصى يقارب 4096 حرفًا.
-    if len(message) > MAX_MESSAGE_LENGTH:
+    current_chunk = header
+    is_first_chunk = True
 
-        print(
-            "⚠️ تقرير Telegram تجاوز الحد الأقصى "
-            "لرسالة واحدة (4096 حرف تقريبًا)."
+    for item_text in item_texts:
+
+        # حالة نادرة: خبر واحد بمفرده أطول من الحد المسموح.
+        # في هذه الحالة نرسله وحده كما هو (لن نقسّم داخل نفس الخبر)
+        # مع تحذير في السجلات.
+        if len(item_text) > MAX_MESSAGE_LENGTH:
+
+            print(
+                "⚠️ عنصر خبر واحد يتجاوز بمفرده حد رسالة "
+                "Telegram — سيتم إرساله كما هو."
+            )
+
+            if current_chunk.strip():
+                messages.append(current_chunk)
+
+            messages.append(item_text)
+
+            current_chunk = ""
+            continue
+
+        candidate = current_chunk + item_text
+
+        if len(candidate) > MAX_MESSAGE_LENGTH:
+
+            # أغلق الرسالة الحالية وابدأ رسالة جديدة بهذا العنصر.
+            messages.append(current_chunk)
+
+            current_chunk = item_text
+            is_first_chunk = False
+
+        else:
+
+            current_chunk = candidate
+
+    if current_chunk.strip():
+        messages.append(current_chunk)
+
+    total_parts = len(messages)
+
+    # =========================================================
+    # إرسال كل جزء على حدة، مع ترقيم الأجزاء إذا كانت أكثر من رسالة.
+    # =========================================================
+
+    for idx, part in enumerate(messages, start=1):
+
+        if total_parts > 1:
+
+            part_to_send = (
+                f"{part}\n\n"
+                f"📄 (الجزء {idx}/{total_parts})"
+            )
+
+        else:
+
+            part_to_send = part
+
+        sent = _send_message(
+            part_to_send
         )
 
-        print(
-            f"📏 طول التقرير: {len(message)} حرف."
-        )
+        if not sent:
 
-        print(
-            "ℹ️ لن يتم تقسيم التقرير إلى عدة رسائل."
-        )
-
-        return
-
-    _send_message(
-        message
-    )
+            print(
+                f"⚠️ فشل إرسال الجزء {idx}/{total_parts} "
+                "من تقرير Telegram."
+            )
 
 
 def send_error_alert(
