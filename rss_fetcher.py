@@ -53,13 +53,8 @@ KOOORA_TIMEZONE = timezone(
     timedelta(hours=3)
 )
 
-# نافذة الأخبار الجديدة.
 FINAL_MAX_AGE_HOURS = 3
-
-# نافذة أوسع لاختيار المرشحين من صفحة القائمة.
 PRECHECK_MAX_AGE_HOURS = 9
-
-# مدة إعادة محاولة الأخبار التي فشلت.
 FAILED_RETRY_HOURS = 6
 
 
@@ -552,10 +547,6 @@ def _extract_datetime_from_node_attributes(node):
     return None
 
 
-# ============================================================
-# وقت القائمة
-# ============================================================
-
 def _extract_entry_time(anchor):
 
     if anchor is None:
@@ -681,7 +672,13 @@ def _article_url(url: str) -> bool:
 
         parsed = urllib.parse.urlparse(url)
 
-        if parsed.netloc.lower() not in {
+        # استخدام hostname بدل netloc حتى لا يؤدي وجود
+        # :443 أو أي منفذ في الرابط إلى رفض رابط كووورة.
+        hostname = (
+            parsed.hostname or ""
+        ).lower()
+
+        if hostname not in {
             "kooora.com",
             "www.kooora.com",
         }:
@@ -1332,8 +1329,6 @@ def _parse_kooora_page(
                     f"   📰 {title[:180]}"
                 )
 
-            # لا نحذف الخبر نهائيًا.
-            # نرسله للتحقق المباشر من صفحة الخبر.
             results.append(
                 {
                     "title": title,
@@ -1536,12 +1531,6 @@ def _fetch_kooora_direct(
 
                     page_verification_failed += 1
 
-                    # ---------------------------------------------
-                    # مهم:
-                    # الفشل المؤقت لا يضيع الخبر.
-                    # يتم حفظه ليعاد فحصه خلال 6 ساعات.
-                    # ---------------------------------------------
-
                     if verified.get(
                         "retryable"
                     ):
@@ -1692,10 +1681,6 @@ def _retry_failed_news(
         ):
             continue
 
-        # -------------------------------------------------
-        # إذا كان العنوان أصبح ممنوعًا، لا نعيده.
-        # -------------------------------------------------
-
         if _is_filtered_title(
             title
         ):
@@ -1754,12 +1739,6 @@ def _retry_failed_news(
         resolved_url = verified[
             "resolved_url"
         ]
-
-        # -------------------------------------------------
-        # مهم:
-        # خبر فشل سابقًا لكنه أصبح أقدم من 3 ساعات
-        # لا يتم نشره كخبر جديد.
-        # -------------------------------------------------
 
         if not _is_recent(
             real_published_dt,
@@ -2109,17 +2088,9 @@ def fetch_prioritized_news(
         f"{cutoff.isoformat()}"
     )
 
-    # =====================================================
-    # أولًا: استعادة الأخبار التي فشلت سابقًا.
-    # =====================================================
-
     retry_news = _retry_failed_news(
         cycle_start
     )
-
-    # =====================================================
-    # ثانيًا: جلب الأخبار الجديدة.
-    # =====================================================
 
     direct_news = _fetch_kooora_direct(
         cycle_start,
@@ -2154,10 +2125,6 @@ def fetch_prioritized_news(
 
         all_news = retry_news + fallback_news
 
-    # =====================================================
-    # إزالة التكرار بين الأخبار المستعادة والجديدة.
-    # =====================================================
-
     final_news = []
 
     seen_links = set()
@@ -2172,8 +2139,6 @@ def fetch_prioritized_news(
         if not published_dt:
             continue
 
-        # جميع الأخبار التي سيتم إرسالها إلى main.py
-        # يجب أن تكون حديثة ضمن نافذة الـ3 ساعات.
         if not _is_recent(
             published_dt,
             cycle_start,
@@ -2225,10 +2190,6 @@ def fetch_prioritized_news(
         key=lambda x: x["published_dt"],
         reverse=True,
     )
-
-    # =====================================================
-    # تنظيف الحقول الداخلية.
-    # =====================================================
 
     for news in final_news:
 
