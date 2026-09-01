@@ -147,11 +147,22 @@ def run_pipeline():
             "أخبار قابلة لإعادة المحاولة ضمن الدورة."
         )
 
-        send_cycle_report(
-            [],
-            0,
-            0,
-        )
+        # إرسال التقرير مع العدد الحقيقي للأخبار المفحوصة
+        # ونتيجة فلترة العناوين.
+        try:
+
+            send_cycle_report(
+                [],
+                checked_count,
+                0,
+                filtered_title_items,
+            )
+
+        except Exception as e:
+
+            print(
+                f"⚠️ تعذر إرسال تقرير Telegram: {e}"
+            )
 
         return
 
@@ -666,11 +677,20 @@ def run_pipeline():
     # تقرير Telegram
     # ======================================================
 
-    send_cycle_report(
-        published_items,
-        checked_count,
-        skipped_count,
-    )
+    try:
+
+        send_cycle_report(
+            published_items,
+            checked_count,
+            skipped_count,
+            filtered_title_items,
+        )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ تعذر إرسال تقرير Telegram: {e}"
+        )
 
     print(
         "\n🎉 اكتملت الدورة بنجاح."
