@@ -76,8 +76,16 @@ jobs:
       - name: حفظ قاعدة بيانات منع التكرار (news.db) داخل المستودع
         if: always()
         run: |
+          set -e
+
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # التأكد من وجود قاعدة البيانات قبل محاولة حفظها
+          if [ ! -f news.db ]; then
+            echo "لا توجد news.db لحفظها."
+            exit 0
+          fi
 
           git add news.db
 
@@ -88,7 +96,112 @@ jobs:
 
           git commit -m "تحديث news.db [skip ci]"
 
-          # سحب أي التزامات جديدة من المستودع مع إعادة التركيب لمنع تعارض الـ Push
-          git pull --rebase origin ${{ github.ref_name }}
+          # --------------------------------------------------
+          # محاولة رفع قاعدة البيانات عدة مرات في حال
+          # وصول تحديث جديد إلى الفرع أثناء تشغيل الدورة.
+          # --------------------------------------------------
 
-          git push origin HEAD:${{ github.ref_name }}
+          for attempt in 1 2 3 4 5; do
+
+            echo "=========================================="
+            echo "محاولة حفظ news.db رقم: $attempt"
+            echo "=========================================="
+
+            # جلب آخر نسخة من المستودع
+            git fetch origin ${{ github.ref_name }}
+
+            # معرفة الالتزام الموجود حاليًا على origin
+            REMOTE_COMMIT=$(git rev-parse origin/${{ github.ref_name }})
+            LOCAL_COMMIT=$(git rev-parse HEAD)
+
+            echo "آخر Commit على GitHub: $REMOTE_COMMIT"
+            echo "Commit الحالي: $LOCAL_COMMIT"
+
+            # ------------------------------------------------
+            # محاولة إعادة تركيب Commit الحالي فوق آخر نسخة.
+            #
+            # news.db ملف Binary، لذلك إذا حدث تعارض:
+            # نستخدم نسخة news.db التي أنشأتها هذه الدورة
+            # ثم نكمل عملية rebase.
+            # ------------------------------------------------
+
+            if git rebase origin/${{ github.ref_name }}; then
+
+              echo "✅ تمت مزامنة المستودع بنجاح."
+
+            else
+
+              echo "⚠️ حدث تعارض أثناء rebase."
+
+              # إلغاء rebase الفاشل
+              git rebase --abort || true
+
+              # جلب أحدث نسخة مرة أخرى
+              git fetch origin ${{ github.ref_name }}
+
+              # حفظ نسخة قاعدة البيانات التي أنشأتها الدورة الحالية
+              cp news.db /tmp/news_current.db
+
+              # ------------------------------------------------
+              # نبدأ من أحدث Commit موجود على GitHub
+              # مع الاحتفاظ بقاعدة البيانات الحالية للدورة.
+              # ------------------------------------------------
+
+              git reset --hard origin/${{ github.ref_name }}
+
+              cp /tmp/news_current.db news.db
+
+              git add news.db
+
+              # إنشاء Commit جديد فوق آخر نسخة موجودة على GitHub
+              if git diff --cached --quiet; then
+                echo "لا يوجد تغيير جديد في news.db بعد المزامنة."
+                exit 0
+              fi
+
+              git commit -m "تحديث news.db [skip ci]"
+
+              echo "✅ تمت معالجة تعارض news.db."
+            fi
+
+            # ------------------------------------------------
+            # محاولة Push
+            # ------------------------------------------------
+
+            if git push origin HEAD:${{ github.ref_name }}; then
+
+              echo "✅ تم حفظ news.db بنجاح."
+              exit 0
+
+            fi
+
+            echo "⚠️ فشل Push بسبب تحديث جديد على المستودع."
+
+            # إعطاء فرصة قصيرة قبل المحاولة التالية
+            sleep 3
+
+            # التأكد من العودة إلى حالة نظيفة قبل المحاولة التالية
+            git fetch origin ${{ github.ref_name }}
+
+            # حفظ قاعدة البيانات الحالية
+            cp news.db /tmp/news_current.db
+
+            # الانتقال إلى آخر نسخة موجودة على GitHub
+            git reset --hard origin/${{ github.ref_name }}
+
+            # استعادة قاعدة البيانات الحالية
+            cp /tmp/news_current.db news.db
+
+            git add news.db
+
+            if git diff --cached --quiet; then
+              echo "لا توجد تغييرات جديدة بعد المزامنة."
+              exit 0
+            fi
+
+            git commit -m "تحديث news.db [skip ci]"
+
+          done
+
+          echo "❌ تعذر حفظ news.db بعد عدة محاولات."
+          exit 1
