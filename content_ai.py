@@ -172,7 +172,10 @@ def get_client():
     key = API_KEYS[current_key_index]
 
     return genai.Client(
-        api_key=key
+        api_key=key,
+        http_options=types.HttpOptions(
+            timeout=1200000
+        ),
     )
 
 
